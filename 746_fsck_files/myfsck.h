@@ -7,6 +7,17 @@ A file system check utility.
 
 Part 1: Read partition table
 */
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<sys/types.h>
+#include<unistd.h>
+#include<sys/types.h>
+#include<sys/stat.h>
+#include<fcntl.h>
+#include"ext2_fs.h"
+#include"genhd.h"
+
 #define DEBUG
 #ifdef DEBUG
 #define dbg_p(...) printf(__VA_ARGS__)
@@ -27,38 +38,40 @@ Part 1: Read partition table
 #define ZERO 0
 #define PTR_ENTRY 16
 #define FIRST_BLOCK 
-static int first_block;
+static int first_block; //GD
 #define	START_SECTOR
-static int start_sector;
+static int start_sector; //PARTITION
 #define INODES_PER_GROUP
-static int inodes_per_group;
+static int inodes_per_group; //SB
+#define TOTAL_INODES
+static int total_inodes; //SB
+#define INODE_SIZE
+static int inode_size; //SB
+#define BLOCK_SIZE
+static unsigned int block_size; 
 // n -> inode number
 //offset -> disk offset to get inode number
 #define BLOCK_OFFSET(x)  (x*1024)
-#define DISK_OFFSET(n) (first_block + (n-1)*128)
+#define DISK_OFFSET(n) (first_block + (n-1)*inode_size)
 #define INODE_NUMBER(offset) ((offset-5120)/128) + 1
 #define INODE_TO_SECTOR(n) (DISK_OFFSET(n))/512
 #define ROUNDS_OFF(n) ( (DISK_OFFSET(n)%512==0)?(DISK_OFFSET(n)/512):0)
 #define GET_OFFSET(n) (DISK_OFFSET(n)%512)
-#define GET_BLOCK_GROUP(n) (n-1)/inodes_per_group
 
-#include<stdio.h>
-#include<stdlib.h>
-#include<string.h>
-#include<sys/types.h>
-#include<unistd.h>
-#include<sys/types.h>
-#include<sys/stat.h>
-#include<fcntl.h>
-#include"ext2_fs.h"
-#include"genhd.h"
+#define GET_BLOCK_GROUP(n) (n-1)/inodes_per_group
+#define GET_INDEX(n) (n)%inodes_per_group
+#define GET_CONT_BLOCK(index) ( (index*inode_size) / block_size)
+
 
 static int device;
 static const sector_size_bytes = 512;
 static int level=0;
 static struct ext2_super_block* super=NULL;
 static struct ext2_group_desc* group_desc=NULL;
-
+static struct partition_table* head=NULL;
+static unsigned int fs_size;
+static unsigned blocks_per_group;
+static unsigned total_block_count;
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -69,10 +82,12 @@ struct partition_table{
 void buildList(struct partition_table** ,int sector);
 void addToList(struct partition_table** head,struct partition_table* current);
 void addExtendedPartition(struct partition_table** head,struct partition_table* given);
+void checkFS(int f);
+void startCheck(struct partition_table* temp);
 
 void assign_partition(struct partition_table** head);
 void printList(struct partition_table** head);
-struct partition_table* get_partition(struct partition_table**, int );
+struct partition_table* get_partition(struct partition_table*, int );
 
 void checkForExtended(struct partition_table** head);
 void readSuperBlock(struct partition_table* temp);
@@ -84,13 +99,15 @@ struct ext2_inode* getInode(unsigned int n);
 
 void print_usage(void)
 {
-	printf("Please enter format as follows:\n ./myfsck -p <partition number>");
-	printf(" -i <disk image> \n");
+	printf("Please enter format as follows:\n");
+	printf("./myfsck -p <partition number> OR");
+	printf("./myfsck -f <partition number>");
+	printf(" AND -i <disk image>\n");
 	exit(0);
 
 }
 
-void fillArgs(int argc,char** argv,int* p,char** buf)
+void fillArgs(int argc,char** argv,int* p,int *f,char** buf)
 {
 	int opt;
 	int partition;
@@ -112,7 +129,7 @@ void fillArgs(int argc,char** argv,int* p,char** buf)
 		    		args++;
 	            	break;
 			case 'f':
-					*buf=optarg;
+					*f=atoi(optarg);
 					args++;
 					break;
             default:			
@@ -120,8 +137,8 @@ void fillArgs(int argc,char** argv,int* p,char** buf)
 
 		}	
 	
-	if(args==2)
-		break;
+		if(args==2)
+			break;
 				
 
 	}
@@ -132,12 +149,12 @@ Partition -p for diskimage -i option
 */
 void partitionTableEntry(int partition,int sector)
 {
-		struct partition_table* head=NULL;		
+		///struct partition_table* head=NULL;		
 		struct partition_table* got=NULL;
 		buildList(&head,sector);		
 		assign_partition(&head);	
 	//	printList(&head);	
-		got=get_partition(&head,partition);
+		got=get_partition(head,partition);
 		
 		if(got!=NULL)
 			printf("0x%02X %d %d\n",got->p.sys_ind,got->p.start_sect,got->p.nr_sects);
@@ -156,12 +173,11 @@ void assign_partition(struct partition_table** head)
 	for(;temp!=NULL;temp=temp->next) {
 			temp->p_no=i;
 			i++;	
-	}	
-	
+	}		
 }
-struct partition_table* get_partition(struct partition_table ** head,int partition)
+struct partition_table* get_partition(struct partition_table * head,int partition)
 {
-	struct partition_table* temp=*head;
+	struct partition_table* temp=head;
 	
 	for(;temp!=NULL;temp=temp->next)
 	{
@@ -210,12 +226,11 @@ void buildList(struct partition_table** head,int sector)
 	}
 		checkForExtended(head);
 		
-	if(((temp=get_partition(head,1))!=NULL))
-	{			
-		start_sector=temp->p.start_sect;
-		printf("START_SECTOR %d\n",start_sector);	
-		readSuperBlock(temp);
-	}
+//	if(((temp=get_partition(*head,1))!=NULL))
+//	{			
+//		printf("START_SECTOR %d\n",start_sector);	
+//		readSuperBlock(temp);
+//	}
 //	readGroupDescriptor(super);	
 }
 void checkForExtended(struct partition_table** head)
@@ -300,41 +315,95 @@ void addToList(struct partition_table** head,struct partition_table* current)
 	
 	}
 }
+void checkFS(int f)
+{
+	struct partition_table* temp=NULL;
+	
+	buildList(&head,ZERO);		
+	assign_partition(&head);	
+	
+	dbg_p("f-->%d\n",f);
+	
+	if(f<0)
+		print_usage();	
+	
+	if(f==ZERO)
+		dbg_p("Check for every ext2 partition\n");	
+	else {
+	 	dbg_p("Check for %d ext2 partition\n",f);
+	
+		if((temp=get_partition(head,f))!=NULL){
+		
+			if(temp->p.sys_ind == LINUX_EXT2_PARTITION)
+					startCheck(temp);
+			else{
+				dbg_p("Not an EXT2 Partition\n");
+				return;
+			}	
+		}	
+		else{
+				
+			dbg_p("NO SUCH PARTITON EXISTS!\n");
+			return;
+		}	
+
+
+	}
+
+}
+void startCheck(struct partition_table* temp)
+{
+		readSuperBlock(temp);
+
+
+
+}
 
 void readSuperBlock(struct partition_table* temp)
 {
-	struct ext2_super_block* get=NULL;
-	struct ext2_dir_entry* get_dir=NULL;
 	struct ext2_inode* inode=NULL;
 	char buf[sector_size_bytes*6];
-	dbg_p("%s: size is %lu\n",__func__,sizeof(buf));	
+	
+	dbg_p("%s: BUFFER size is %lu\n",__func__,sizeof(buf));	
+
+	/*Malloc-read-copy*/
 	super=malloc(sizeof(struct ext2_super_block));
-	
 	read_device(device,temp->p.start_sect,6,buf);
-	
 	memcpy(super,(buf+1024),sizeof(struct ext2_super_block));
 	
 	if(super->s_magic == EXT2_SUPER_MAGIC)
-		printf("Magic number is %04x\n",super->s_magic);
-	else
-		printf("NO!\n");
-//	printf("The inode number is %u\n",get->s_first_ino);
-//	printf("THe block size is %u\n",EXT2_BLOCK_SIZE(get));
+		dbg_p("Magic number is %04x\n",super->s_magic);
+	else{
+		dbg_p("SuperBlock Magic number does not match!!\n");
+		return;
+	}
+
+	//Get the required information
+	
+	total_inodes=super->s_inodes_count;
+	total_block_count=super->s_blocks_count;
+	block_size=EXT2_BLOCK_SIZE(super);
+	inode_size=EXT2_INODE_SIZE(super);
+	inodes_per_group=super->s_inodes_per_group;
+	blocks_per_group=super->s_blocks_per_group;	
+	start_sector=temp->p.start_sect;
+	
 	print_superBlock(super);	
 	readGroupDescriptor((buf));
 	
-	inode=getInode(2);
+	inode=getInode(4019);
+	
+
 }
 
 
 void readGroupDescriptor(char* buf)
 {
-
-	
+	/*malloc & copy*/
 	group_desc=malloc(sizeof(struct ext2_group_desc));
 	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc));
-	print_groupDescriptor(group_desc);
 	first_block=BLOCK_OFFSET(group_desc->bg_inode_table);
+	print_groupDescriptor(group_desc);
 	dbg_p("First block %d\n",first_block);
 
 }
@@ -372,23 +441,25 @@ void print_groupDescriptor(struct ext2_group_desc* gd)
 struct ext2_inode* getInode(unsigned int n)
 {
 	struct ext2_inode* current=NULL;
-	char buf[sector_size_bytes];
+	char buf[sector_size_bytes*8];
 	struct ext2_dir_entry_2* dir=NULL;
 	unsigned int sector=0;
 	unsigned int offset;
 	unsigned int block=0;
+    unsigned int current_block = GET_BLOCK_GROUP(n); 	
+	unsigned int add_sectors = ((current_block*blocks_per_group*2));
 	
 	current=malloc(sizeof(struct ext2_inode));
-	sector=start_sector;
-	printf("The sector is %d\n",sector);
-	sector=INODE_TO_SECTOR(n);
-	sector+=start_sector;
+	add_sectors+=start_sector;
+	printf("The add sector is %d\n",add_sectors);
+	sector=INODE_TO_SECTOR(GET_INDEX(n));
+	sector+=add_sectors;
 	printf("The sector is %d\n",sector);
 	//offset=BLOCK_OFFSET(5);	
 	//i=INODE_NUMBER(offset);
 	//printf("THe inode is %d\n",i);
-	read_device(device,(sector),1,buf);
-	if(ROUNDS_OFF(n)){
+	read_device(device,(sector),3,buf);
+	if(ROUNDS_OFF(GET_INDEX(n))){
 		offset=0;
 		printf("It does\n");
 	}
@@ -408,23 +479,15 @@ struct ext2_inode* getInode(unsigned int n)
 	dir=malloc(sizeof(struct ext2_dir_entry_2));
 	read_device(device,sector,1,buf);
 	memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
+	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 	block=dir->rec_len;		
-	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
+	while(dir->inode!=0) { 
+	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 	block+=dir->rec_len;		
 	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
-	block+=dir->rec_len;		
-	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
-	block+=dir->rec_len;		
-	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
-	block+=dir->rec_len;		
-	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d\n",dir->inode,dir->name,dir->rec_len);
+	}
 	
+		
 	return current;
 #endif
 }

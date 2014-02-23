@@ -15,11 +15,11 @@ int main(int argc,char** argv)
 {
 	
 	char* disk_image;
-	int partition;	
+	int partition=0;	
 	int sector=0;
-	
+ 	int f_part;	
 	/*Get the arguments from command line*/	
-	fillArgs(argc,argv,&partition,&disk_image);		
+	fillArgs(argc,argv,&partition,&f_part,&disk_image);		
 
 	if( (device = open(disk_image,O_RDWR)) == -1) {
 		
@@ -27,8 +27,10 @@ int main(int argc,char** argv)
 		exit(-1);
 	}
 	/*get the partition entry*/
-	partitionTableEntry(partition,sector);
-	
+	if(partition!=0)
+		partitionTableEntry(partition,sector);
+	else
+		checkFS(f_part);
 	return 0;
 }
 
