@@ -12,7 +12,7 @@ readwrite.o:
 	gcc -c readwrite.c 	
 
 myfsck.o:
-	gcc -c myfsck.c  
+	gcc -c myfsck.c   
 
 clean:
 	rm -f myfsck myfsck.o readwrite.o
