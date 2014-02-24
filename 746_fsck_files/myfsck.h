@@ -15,6 +15,7 @@ Part 1: Read partition table
 #include<sys/types.h>
 #include<sys/stat.h>
 #include<fcntl.h>
+#include<inttypes.h>
 #include"ext2_fs.h"
 #include"genhd.h"
 
@@ -37,6 +38,7 @@ Part 1: Read partition table
 #define PTR_START 446
 #define ZERO 0
 #define PTR_ENTRY 16
+#define BASE_OFFSET 1024
 #define FIRST_BLOCK 
 static int first_block; //GD
 #define	START_SECTOR
@@ -49,9 +51,14 @@ static int total_inodes; //SB
 static int inode_size; //SB
 #define BLOCK_SIZE
 static unsigned int block_size; 
+#define BLOCK_BITMAP
+static unsigned char* block_bitmap;
+#define INODE_BITMAP
+static unsigned char* inode_bitmap;
+
 // n -> inode number
 //offset -> disk offset to get inode number
-#define BLOCK_OFFSET(x)  (x*1024)
+#define BLOCK_OFFSET(block)  (BASE_OFFSET + (block-1)*block_size)
 #define DISK_OFFSET(n) (first_block + (n-1)*inode_size)
 #define INODE_NUMBER(offset) ((offset-5120)/128) + 1
 #define INODE_TO_SECTOR(n) (DISK_OFFSET(n))/512
@@ -72,6 +79,7 @@ static struct partition_table* head=NULL;
 static unsigned int fs_size;
 static unsigned blocks_per_group;
 static unsigned total_block_count;
+static unsigned int do_copy=0;
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -79,6 +87,7 @@ struct partition_table{
 		struct partition_table* next;
 
 };
+
 void buildList(struct partition_table** ,int sector);
 void addToList(struct partition_table** head,struct partition_table* current);
 void addExtendedPartition(struct partition_table** head,struct partition_table* given);
@@ -94,9 +103,17 @@ void readSuperBlock(struct partition_table* temp);
 void readGroupDescriptor(char* buf);
 void print_superBlock(struct ext2_super_block* s);
 void print_groupDescriptor(struct ext2_group_desc* gd);
-struct ext2_inode* getInode(unsigned int n);
+struct ext2_inode* checkInode(unsigned int n,unsigned int parent);
+void checkDirectories(void);
+void checkUnreferenced(void);
+void checkItself(struct ext2_dir_entry_2* dir,int itself);
+void checkLinkCount(void);
+void checkBitMap(void);
+void checkParent(struct ext2_dir_entry_2* dir,int parent);
+struct ext2_inode* read_inode( int inode_no);
 
-
+void print_inode(struct ext2_inode* inode);
+	
 void print_usage(void)
 {
 	printf("Please enter format as follows:\n");
@@ -353,11 +370,42 @@ void checkFS(int f)
 }
 void startCheck(struct partition_table* temp)
 {
+		int pass=1;
 		readSuperBlock(temp);
+		while(pass!=4) {
+			
+			switch(pass)
+			{
 
+					case 1: 
+						checkDirectories();
+						pass++;
+						break;
+					case 2:
+						checkUnreferenced();
+						pass++;
+						break;
+					case 3:
+						checkLinkCount();
+						pass++;
+						break;
+					case 4:
+						checkBitMap();
+						pass++;
+						break;
+					default:
+							break;
+
+
+			}
+
+		}
 
 
 }
+
+
+
 
 void readSuperBlock(struct partition_table* temp)
 {
@@ -365,19 +413,27 @@ void readSuperBlock(struct partition_table* temp)
 	char buf[sector_size_bytes*6];
 	
 	dbg_p("%s: BUFFER size is %lu\n",__func__,sizeof(buf));	
-
 	/*Malloc-read-copy*/
 	super=malloc(sizeof(struct ext2_super_block));
 	read_device(device,temp->p.start_sect,6,buf);
 	memcpy(super,(buf+1024),sizeof(struct ext2_super_block));
-	
-	if(super->s_magic == EXT2_SUPER_MAGIC)
-		dbg_p("Magic number is %04x\n",super->s_magic);
-	else{
-		dbg_p("SuperBlock Magic number does not match!!\n");
-		return;
-	}
 
+	while(1){
+	
+		if(super->s_magic == EXT2_SUPER_MAGIC){
+			dbg_p("Magic number is %04x\n",super->s_magic);
+			break;
+		}
+		else{
+			
+			dbg_p("SuperBlock Magic number does not match!!\n");
+			
+			return;
+		
+		
+		}
+		
+	}
 	//Get the required information
 	
 	total_inodes=super->s_inodes_count;
@@ -388,10 +444,10 @@ void readSuperBlock(struct partition_table* temp)
 	blocks_per_group=super->s_blocks_per_group;	
 	start_sector=temp->p.start_sect;
 	
-	print_superBlock(super);	
+//	print_superBlock(super);	
 	readGroupDescriptor((buf));
 	
-	inode=getInode(4019);
+//	inode=checkInode(2,2);
 	
 
 }
@@ -399,13 +455,51 @@ void readSuperBlock(struct partition_table* temp)
 
 void readGroupDescriptor(char* buf)
 {
+	int64_t lret;
+	int64_t sector_offset;
+	ssize_t ret;
 	/*malloc & copy*/
 	group_desc=malloc(sizeof(struct ext2_group_desc));
 	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc));
 	first_block=BLOCK_OFFSET(group_desc->bg_inode_table);
-	print_groupDescriptor(group_desc);
-	dbg_p("First block %d\n",first_block);
+	block_bitmap=malloc(block_size);
+	
+	sector_offset=BLOCK_OFFSET(group_desc->bg_block_bitmap);
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
 
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+	inode_bitmap=malloc(block_size);
+	
+	sector_offset=BLOCK_OFFSET(group_desc->bg_inode_bitmap);
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
+
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=read(device,inode_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+	
+//	print_groupDescriptor(group_desc);
+	dbg_p("First block %d\n",first_block);
+	
 }
 void print_superBlock(struct ext2_super_block* s)
 {
@@ -438,58 +532,235 @@ void print_groupDescriptor(struct ext2_group_desc* gd)
 	printf("---------------GROUP DESC END----------------------------------------\n");
 
 }
-struct ext2_inode* getInode(unsigned int n)
+struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 {
 	struct ext2_inode* current=NULL;
-	char buf[sector_size_bytes*8];
+	char buf[BASE_OFFSET*8];
 	struct ext2_dir_entry_2* dir=NULL;
 	unsigned int sector=0;
+	unsigned int dsector=0;
 	unsigned int offset;
 	unsigned int block=0;
-    unsigned int current_block = GET_BLOCK_GROUP(n); 	
+    unsigned int dots=0;
+	unsigned int current_block = GET_BLOCK_GROUP(n); 	
+	unsigned int i=0;
 	unsigned int add_sectors = ((current_block*blocks_per_group*2));
+	unsigned int in_buf=0;	
 	
-	current=malloc(sizeof(struct ext2_inode));
+	//current=malloc(sizeof(struct ext2_inode));
+	current=read_inode(n);
+	if(current==NULL) {
+		//print_inode(current);
+		return;
+	}
+#if 0
 	add_sectors+=start_sector;
-	printf("The add sector is %d\n",add_sectors);
+//	printf("The add sector is %d\n",add_sectors);
 	sector=INODE_TO_SECTOR(GET_INDEX(n));
 	sector+=add_sectors;
-	printf("The sector is %d\n",sector);
+//	printf("The sector is %d\n",sector);
 	//offset=BLOCK_OFFSET(5);	
 	//i=INODE_NUMBER(offset);
 	//printf("THe inode is %d\n",i);
-	read_device(device,(sector),3,buf);
+	read_device(device,(sector),4,buf);
 	if(ROUNDS_OFF(GET_INDEX(n))){
 		offset=0;
-		printf("It does\n");
+//		printf("It does\n");
 	}
 	else{
 		offset=GET_OFFSET(n);
 		printf("It doesnt offset is %d\n",offset);
 	}
 	memcpy(current,(buf+offset),sizeof(struct ext2_inode));
-	printf("Size in bytes %u pointer to first data block %u blocks count %d\n",current->i_size,current->i_block[0],current->i_blocks);
-	printf("%d\n",6/8);
+	
+//	print_inode(current);
+//	return NULL;
+#endif
+//	printf("Size in bytes %u pointer to first data block %u blocks count %d\n",current->i_size,current->i_block[0],current->i_blocks);
+	//printf("%d\n",6/8);
+	for(;current->i_block[i]!=0;i++){
 #if 1 
-	block=current->i_block[0];
-	block=BLOCK_OFFSET(block);
-	sector=block/512;
-	sector+=start_sector;
-	printf("The sector is %d\n",sector);
-	dir=malloc(sizeof(struct ext2_dir_entry_2));
-	read_device(device,sector,1,buf);
-	memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));
-	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-	block=dir->rec_len;		
-	while(dir->inode!=0) { 
-	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-	block+=dir->rec_len;		
-	memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+		block=current->i_block[i];
+		block=BLOCK_OFFSET(block);
+		dsector=block/sector_size_bytes;
+		dsector+=start_sector;
+//	printf("The sector is %d\n",sector);
+		dir=malloc(sizeof(struct ext2_dir_entry_2));
+		if(dir==NULL) return NULL;
+		read_device(device,dsector,2,buf);
+		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));
+//	printf("1 INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		block=dir->rec_len;		
+//	if(n!=2)
+	//	p=dir->inode;		
+#endif
+	
+#if 1		
+	while(dir->inode!=0) {
+//	while(block < current->i_size) 
+#if 1
+	
+		if( dir->file_type==2 ) {
+
+			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+				dots++;	
+				if(!strcmp(dir->name,".")) {
+				//	p=dir->inode;
+					checkItself(dir,n);
+				}
+				else {
+					
+	
+		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,p);
+					checkParent(dir,p);	
+				}
+			}		
+			else {
+			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+//			printf("%s/",dir->name);
+//	if(dots==2)
+//		printf("\nDirectory has parent and self!\n");
+			//if(n==2)
+			//	p=2;
+			//else
+			//	p=dir->		
+	
+			checkInode(dir->inode,p);	
+			printf("\n");
+			}
+#endif
+			if(do_copy){
+	//			dbg_p("-----DO COPY!!!!------------\n");
+#if 0		
+				memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
+				write_sectors(dsector,1,buf);
+#endif		
+				do_copy=0;
+			}
+	
+	 }
+		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+		in_buf+=block;
+		block+=dir->rec_len;		
 	}
 	
+#endif	
+    }
+ 
+#if 0
+	while(dir->inode!=0 && dir->file_type==2) { 
+	//	printf("2 INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
 		
-	return current;
+	if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+			
+	}
+	else {
+			
+			printf("%s/",dir->name);
+			checkInode(dir->inode,p);
+
+
+	}	
+		block+=dir->rec_len;		
+	}
 #endif
+		return current;
+//#endif
+}
+void checkItself(struct ext2_dir_entry_2* dir,int itself)
+{
+	if(dir->inode==itself)
+		 return;
+	else{
+		do_copy=1;
+		printf("BAD inode number for '.'.\nChange inode number of '.' to %d",itself);
+		dir->inode=itself;
+	
+	}
 }
 
+void checkParent(struct ext2_dir_entry_2* dir,int parent)
+{
 
+	if(dir->inode==parent)
+;//		dbg_p("Points to parent\n");
+	else {
+		do_copy=1;
+		printf("BAD PARENT POINTER for '..'\nChange inode number of '..' to %d\n",parent);		dir->inode=parent;
+
+	}
+
+
+}
+void checkDirectories(void)
+{
+
+	checkInode(2,2); //2-->ROOT,2-->PARENT
+	
+
+}
+void checkUnreferenced(void)
+{
+
+
+
+}
+void checkLinkCount(void)
+{
+
+
+}
+void checkBitMap(void)
+{
+
+
+
+
+}
+void print_inode(struct ext2_inode* inode)
+{	
+	int i=0;
+	char file_name[EXT2_NAME_LEN+1];
+	for (i=0; i<EXT2_N_BLOCKS; i++)
+		if (i < EXT2_NDIR_BLOCKS) /* direct blocks */
+			printf("Block %2u : %u\n", i, inode->i_block[i]);
+		else if (i == EXT2_IND_BLOCK) /* single indirect block */	
+			printf("Single : %u\n", inode->i_block[i]);	
+		else if (i == EXT2_DIND_BLOCK) /* double indirect block */
+			printf("Double : %u\n", inode->i_block[i]);
+		else if (i == EXT2_TIND_BLOCK) /* triple indirect block */
+			printf("Triple : %u\n", inode->i_block[i]);	
+	
+
+}
+struct ext2_inode* read_inode( int inode_no)
+{
+
+int group_no = inode_no/super->s_inodes_per_group;
+int inode_offs = inode_no - (group_no * inodes_per_group) - 1;
+struct ext2_inode* current=malloc(sizeof(struct ext2_inode));
+unsigned int sector=0;
+unsigned int current_block = GET_BLOCK_GROUP(inode_no); 	
+unsigned int i=0;
+unsigned int add_sectors = ((current_block*blocks_per_group*2));
+unsigned int in_buf=0;	
+unsigned int offset=0;	
+	add_sectors+=start_sector;
+	sector=INODE_TO_SECTOR(GET_INDEX(inode_no));
+	sector+=add_sectors;
+	if(ROUNDS_OFF(GET_INDEX(inode_no))){
+		offset=0;
+//		printf("It does\n");
+	}
+	else{
+		offset=GET_OFFSET(inode_no);
+		printf("It doesnt offset is %d\n",offset);
+	}
+
+	lseek64(device,(sector*sector_size_bytes+offset), SEEK_SET);
+
+	read(device, current, sizeof(struct ext2_inode));
+	return current;
+}
