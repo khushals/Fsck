@@ -19,7 +19,7 @@ Part 1: Read partition table
 #include"ext2_fs.h"
 #include"genhd.h"
 
-#define DEBUG
+#define DEBUGx
 #ifdef DEBUG
 #define dbg_p(...) printf(__VA_ARGS__)
 #else
@@ -335,7 +335,7 @@ void addToList(struct partition_table** head,struct partition_table* current)
 void checkFS(int f)
 {
 	struct partition_table* temp=NULL;
-	
+	int i=1;
 	buildList(&head,ZERO);		
 	assign_partition(&head);	
 	
@@ -344,8 +344,21 @@ void checkFS(int f)
 	if(f<0)
 		print_usage();	
 	
-	if(f==ZERO)
-		dbg_p("Check for every ext2 partition\n");	
+	if(f==ZERO){
+		printf("Check for every ext2 partition\n");	
+		for(;((temp=get_partition(head,i))!=NULL);i++)
+		{
+			if(temp->p.sys_ind == LINUX_EXT2_PARTITION)
+					startCheck(temp);
+			else{
+				dbg_p("Not an EXT2 Partition\n");
+			
+			}	
+		}	
+	
+		return;		
+		
+	}
 	else {
 	 	dbg_p("Check for %d ext2 partition\n",f);
 	
@@ -542,17 +555,16 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 	unsigned int offset;
 	unsigned int block=0;
     unsigned int dots=0;
-	unsigned int current_block = GET_BLOCK_GROUP(n); 	
 	unsigned int i=0;
-	unsigned int add_sectors = ((current_block*blocks_per_group*2));
 	unsigned int in_buf=0;	
-	
+	static int level=0;
 	//current=malloc(sizeof(struct ext2_inode));
 	current=read_inode(n);
 	if(current==NULL) {
 		//print_inode(current);
 		return;
 	}
+//	print_inode(current);
 #if 0
 	add_sectors+=start_sector;
 //	printf("The add sector is %d\n",add_sectors);
@@ -592,7 +604,8 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 //	printf("1 INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 		block=dir->rec_len;		
 //	if(n!=2)
-	//	p=dir->inode;		
+			
+//		if((p=dir->inode)i		
 #endif
 	
 #if 1		
@@ -603,10 +616,11 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 		if( dir->file_type==2 ) {
 
 			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-				dots++;	
+				//dots++;	
 				if(!strcmp(dir->name,".")) {
 				//	p=dir->inode;
 					checkItself(dir,n);
+					
 				}
 				else {
 					
@@ -614,6 +628,8 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,p);
 					checkParent(dir,p);	
+						
+				//	p=dir->inode;
 				}
 			}		
 			else {
@@ -621,20 +637,20 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 //			printf("%s/",dir->name);
 //	if(dots==2)
 //		printf("\nDirectory has parent and self!\n");
-			//if(n==2)
-			//	p=2;
-			//else
-			//	p=dir->		
-	
+			if(level<2)
+				p=2;
+			else
+				p=n;		
+			level++;
 			checkInode(dir->inode,p);	
-			printf("\n");
+			//printf("\n");
 			}
 #endif
 			if(do_copy){
-	//			dbg_p("-----DO COPY!!!!------------\n");
-#if 0		
+				printf("-----DO COPY!!!!------------\n");
+#if 1 		
 				memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
-				write_sectors(dsector,1,buf);
+				write_sectors(dsector,1,(buf));
 #endif		
 				do_copy=0;
 			}
@@ -648,24 +664,6 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 #endif	
     }
  
-#if 0
-	while(dir->inode!=0 && dir->file_type==2) { 
-	//	printf("2 INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-		
-	if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-			
-	}
-	else {
-			
-			printf("%s/",dir->name);
-			checkInode(dir->inode,p);
-
-
-	}	
-		block+=dir->rec_len;		
-	}
-#endif
 		return current;
 //#endif
 }
@@ -756,7 +754,7 @@ unsigned int offset=0;
 	}
 	else{
 		offset=GET_OFFSET(inode_no);
-		printf("It doesnt offset is %d\n",offset);
+	//	printf("It doesnt offset is %d\n",offset);
 	}
 
 	lseek64(device,(sector*sector_size_bytes+offset), SEEK_SET);
