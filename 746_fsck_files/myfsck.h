@@ -81,6 +81,8 @@ static unsigned int fs_size;
 static unsigned blocks_per_group;
 static unsigned total_block_count;
 static unsigned int do_copy=0;
+static unsigned lost_and_found;
+
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -117,6 +119,8 @@ void unsetBit(unsigned char* bitmap,int inode);
 void setBit(unsigned char* bitmap,int inode);
 int checkAllocated(unsigned char* bitmap,int inode);
 void checkMap(unsigned char* bitmap);
+void addToLostAndFound(int inode);
+void addCP(int inode,int c,int p);
 
 void print_inode(struct ext2_inode* inode);
 	
@@ -397,11 +401,13 @@ void startCheck(struct partition_table* temp)
 			{
 
 					case 1: 
-				//		checkDirectories();
+						checkDirectories();
+					//	lost_and_found=11;
 						pass++;
 						break;
 					case 2:
 						checkUnreferenced(ROOT);
+						//checkUnreferenced(ROOT);
 						pass++;
 						break;
 					case 3:
@@ -563,7 +569,8 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
     unsigned int dots=0;
 	unsigned int i=0;
 	unsigned int in_buf=0;	
-	static int level=0;
+	static int level=1;
+	char file_name[EXT2_NAME_LEN+1];
 	//current=malloc(sizeof(struct ext2_inode));
 	current=read_inode(n);
 	if(current==NULL) {
@@ -574,6 +581,7 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 	//printf("%d\n",6/8);
 	for(;current->i_block[i]!=0;i++){
 #if 1 
+		in_buf=0;	
 		block=current->i_block[i];
 		block=BLOCK_OFFSET(block);
 		dsector=block/sector_size_bytes;
@@ -598,21 +606,32 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 				//dots++;	
 				if(!strcmp(dir->name,".")) {
 				//	p=dir->inode;
+					printf("%s\n",dir->name);
 					checkItself(dir,n);
 					
 				}
 				else {
-					
-	
-		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,p);
+				
+			memcpy(file_name,dir->name,dir->name_len);
+			file_name[dir->name_len]='\0';
+			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
 					checkParent(dir,p);	
 						
 				//	p=dir->inode;
 				}
 			}		
 			else {
-			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			
+				memcpy(file_name,dir->name,dir->name_len);
+				file_name[dir->name_len]='\0';
+				if(!strcmp(file_name,"lost+found")){
+					lost_and_found=dir->inode;
+					printf("LostFoundThe inode number is %d and %s\n",dir->inode,file_name);
+				}
+				printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
+				
+				dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
 //			printf("%s/",dir->name);
 //	if(dots==2)
 //		printf("\nDirectory has parent and self!\n");
@@ -782,16 +801,129 @@ void checkMap(unsigned char* bitmap)
 		current=read_inode(i);
 		if((S_ISDIR(current->i_mode))) {
 		printf("D %d\n",i);	
-			if( (checkAllocated(bitmap,i)==1) && (checkAllocated(inode_bitmap,i)==1) )
+			if( (checkAllocated(bitmap,i)==1) )//&& (checkAllocated(inode_bitmap,i)==1) )
 					;
-			else
+			else{
+				
 				printf("Unreferenced inode %d\n",i);
+				addToLostAndFound(i);
+			}
 		}
 		free(current);
 	}	
 
 }
 
+void addToLostAndFound(int inode)
+{
+
+	struct ext2_inode* current=NULL;
+	char* buf=NULL;
+	//char* buf[];
+	int i=0;
+	int block=0;
+	int dsector=0;
+	int in_buf=0;
+	struct ext2_dir_entry_2* prev;
+	struct ext2_dir_entry_2* dir=NULL;
+	char* tracker=NULL;	
+	current=read_inode(lost_and_found);
+	buf=malloc(current->i_size);
+	prev=malloc(sizeof(struct ext2_dir_entry_2));
+	for(;current->i_block[i]!=0;i++) {
+#if 1
+		in_buf=0; 
+		block=current->i_block[i];
+		block=BLOCK_OFFSET(block);
+		dsector=block/sector_size_bytes;
+		dsector+=start_sector;
+	
+//	printf("The sector is %d\n",sector);
+		dir=malloc(sizeof(struct ext2_dir_entry_2));
+		if(dir==NULL) return;
+		read_device(device,dsector,2,buf);
+		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
+		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d block[%d]:%d Size:%d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,i,current->i_block[i],current->i_size);
+		block=dir->rec_len;		
+#endif
+	
+#if 1		
+	//	while(dir->inode!=0) 
+	while(dir->inode!=0) {
+#if 1	
+						printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		//checkAllocated(inode_bitmap,dir->inode);	
+		//setBit(bitmap,dir->inode);
+			if( dir->file_type==2 ) {
+				
+				//setBit(bitmap,dir->inode);
+		//		if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+				printf(" JJ:: %s\n",dir->name);	
+		//				prev=dir;		
+				//		printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		//		printf("present\n");		
+		///		}		
+		//		else {
+			
+				//prev=dir;
+			memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
+			//checkUnreferenced(dir->inode);	
+			
+			//	}
+#endif
+	
+			}	
+	
+			in_buf=dir->rec_len;
+			tracker=buf+block;
+			memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+			
+			block+=dir->rec_len;		
+		}
+	printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
+
+#if 1
+	 
+	if(prev->rec_len>=10)
+	{
+		
+		dir->inode=inode;
+		sprintf(dir->name,"%d",dir->inode);
+		//dir->rec_len=in_buf;//(strlen(dir->name)+1+8);
+		
+		prev->rec_len=(prev->name_len+1+8);	
+	//	if((i=dir->rec_len%4)!=0)
+			//dir->rec_len=(dir->rec_len-i+4);		
+				
+		dir->name_len=strlen(dir->name);
+		printf("%s strlen: %lu dir_name %d\n",dir->name,strlen(dir->name),dir->name_len);
+		if((i=prev->rec_len%4)!=0)
+			prev->rec_len=(prev->rec_len-i+4);	
+	    dir->rec_len=in_buf-prev->rec_len;
+		dir->file_type=2;
+		
+	
+		printf("Size of %lu %lu\n",sizeof(prev),sizeof(dir->name));
+		memcpy((buf+(1024-in_buf)),prev,sizeof(struct ext2_dir_entry_2));
+		memcpy((buf+(1024-in_buf+prev->rec_len)),dir,sizeof(struct ext2_dir_entry));
+		//addCP(inode,inode,lost_and_found);
+		write_sectors(dsector,2,(buf));
+		addCP(inode,inode,lost_and_found);
+    	return;
+	}
+#endif			
+#endif	
+		
+}	
+//	printf("PREV is %d\n",prev->inode);		
+//	memcpy(buf+in_buf,)
+//	dir->inode=inode;
+//	dir->name=		
+		
+		
+		
+
+}
 void setBit(unsigned char* bitmap,int inode)
 {
 	int group_no= inode/inodes_per_group;
@@ -821,8 +953,8 @@ void unsetBit(unsigned char* bitmap,int inode)
 int checkAllocated(unsigned char* bitmap,int inode)
 {
 
-	int group_no= inode/inodes_per_group;
-	int inode_off = inode - (group_no*inodes_per_group)-1;
+	int group_no= (inode-1)/inodes_per_group;
+	int inode_off = (inode-1) %inodes_per_group;
 	int bit_map_index;	
 	int shift_index;
 	bit_map_index = (inode_off)/8 ;
@@ -830,7 +962,7 @@ int checkAllocated(unsigned char* bitmap,int inode)
 	
 //	printf("Bit_map_index %d\nShift Index %d\nInode_off %d Bitmap %d\n",bit_map_index,shift_index,inode_off,bitmap[bit_map_index]);
 	
-	if( (((bitmap[bit_map_index])&(1<<shift_index))>> shift_index))
+	if( (((bitmap[bit_map_index])&(1<<shift_index))))
 				return 1;//	printf("Inode %d aLlocated!\n",inode);
 	else{
 			
@@ -866,6 +998,55 @@ void print_inode(struct ext2_inode* inode)
 	
 
 }
+/*  ADD  '.' and '..' */
+void addCP(int n,int c,int p)
+{
+	struct ext2_inode* current=NULL;
+	char buf[BASE_OFFSET];
+	struct ext2_dir_entry_2* dir=NULL;
+	unsigned int dsector=0;
+	unsigned int block=0;
+	unsigned int i=0;
+	unsigned in_buf=0;
+	current=read_inode(n);
+	
+	if(current==NULL) {
+		
+		printf("%s: No allocation of c&p",__func__);
+		return;	
+
+	}
+
+	print_inode(current);	
+	//printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count);
+	//printf("%d\n",6/8);
+	for(;current->i_block[i]!=0;i++){
+ 
+		block=current->i_block[i];
+		block=BLOCK_OFFSET(block);
+		dsector=block/sector_size_bytes;
+		dsector+=start_sector;
+//	printf("The sector is %d\n",sector);
+		dir=malloc(sizeof(struct ext2_dir_entry_2));
+		if(dir==NULL) return;
+		read_device(device,dsector,2,buf);
+		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
+//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		block=dir->rec_len;		
+		in_buf=dir->rec_len;
+		dir->inode=n;
+		memcpy(buf,dir,sizeof(struct ext2_dir_entry_2));
+		memcpy(dir,buf+dir->rec_len,sizeof(struct ext2_dir_entry_2));			
+		dir->inode=p;
+		memcpy(buf+in_buf,dir,sizeof(struct ext2_dir_entry_2));
+		write_sectors(dsector,2,buf);
+		break;
+	} 
+
+	return;
+
+}
+
 struct ext2_inode* read_inode( int inode_no)
 {
 
