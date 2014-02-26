@@ -66,7 +66,7 @@ static unsigned char* inode_bitmap;
 #define GET_OFFSET(n) (DISK_OFFSET(n)%512)
 
 #define GET_BLOCK_GROUP(n) (n-1)/inodes_per_group
-#define GET_INDEX(n) (n)%inodes_per_group
+#define GET_INDEX(n) ( ((n)%inodes_per_group==0)?(n-1)%inodes_per_group:n%inodes_per_group)
 #define GET_CONT_BLOCK(index) ( (index*inode_size) / block_size)
 #define ROOT 2
 #define CHECK_BIT(x,pos) (x & (1<<pos))
@@ -82,7 +82,7 @@ static unsigned blocks_per_group;
 static unsigned total_block_count;
 static unsigned int do_copy=0;
 static unsigned lost_and_found;
-
+static unsigned group_count;
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -109,8 +109,9 @@ void print_groupDescriptor(struct ext2_group_desc* gd);
 struct ext2_inode* checkInode(unsigned int n,unsigned int parent);
 void checkDirectories(void);
 void checkUnreferenced(int n);
+void clearHashMap(unsigned int* hash_map);
 void checkItself(struct ext2_dir_entry_2* dir,int itself);
-void checkLinkCount(void);
+void checkLinkCount(int inode);
 void checkBitMap(void);
 void checkParent(struct ext2_dir_entry_2* dir,int parent);
 struct ext2_inode* read_inode( int inode_no);
@@ -121,6 +122,8 @@ int checkAllocated(unsigned char* bitmap,int inode);
 void checkMap(unsigned char* bitmap);
 void addToLostAndFound(int inode);
 void addCP(int inode,int c,int p);
+void checkHash(unsigned int* hash_map);
+void getBitMap(int group_no);
 
 void print_inode(struct ext2_inode* inode);
 	
@@ -403,15 +406,17 @@ void startCheck(struct partition_table* temp)
 					case 1: 
 						checkDirectories();
 					//	lost_and_found=11;
+						printf("----------------- 1 PASSS--------------------------------\n");
 						pass++;
 						break;
 					case 2:
 						checkUnreferenced(ROOT);
+						printf("-----------------  PASSS 2--------------------------------\n");
 						//checkUnreferenced(ROOT);
 						pass++;
 						break;
 					case 3:
-						checkLinkCount();
+						checkLinkCount(ROOT);
 						pass++;
 						break;
 					case 4:
@@ -468,7 +473,7 @@ void readSuperBlock(struct partition_table* temp)
 	inodes_per_group=super->s_inodes_per_group;
 	blocks_per_group=super->s_blocks_per_group;	
 	start_sector=temp->p.start_sect;
-	
+	group_count=1+(total_block_count-1)/blocks_per_group;
 //	print_superBlock(super);	
 	readGroupDescriptor((buf));
 	
@@ -484,11 +489,11 @@ void readGroupDescriptor(char* buf)
 	int64_t sector_offset;
 	ssize_t ret;
 	/*malloc & copy*/
-	group_desc=malloc(sizeof(struct ext2_group_desc));
-	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc));
+	group_desc=malloc(sizeof(struct ext2_group_desc)*group_count);
+	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc)*group_count);
 	first_block=BLOCK_OFFSET(group_desc->bg_inode_table);
 	block_bitmap=malloc(block_size);
-	
+#if 0		
 	sector_offset=BLOCK_OFFSET(group_desc->bg_block_bitmap)+start_sector*sector_size_bytes;
 	
 	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
@@ -504,8 +509,9 @@ void readGroupDescriptor(char* buf)
 		exit(-1);
 
 	}
+#endif
 	inode_bitmap=malloc(block_size);
-	
+#if 0
 	sector_offset=BLOCK_OFFSET(group_desc->bg_inode_bitmap)+start_sector*sector_size_bytes;
 	
 	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
@@ -521,10 +527,52 @@ void readGroupDescriptor(char* buf)
 		exit(-1);
 
 	}
+#endif
 //	checkAllocated(inode_bitmap,200);	
 //	print_groupDescriptor(group_desc);
 	dbg_p("First block %d\n",first_block);
 	
+}
+void getBitMap(int inode)
+{
+	int64_t lret;
+	int64_t sector_offset;
+	ssize_t ret;
+	int group_no= (inode-1)/inodes_per_group;
+	int inode_off = (inode-1) %inodes_per_group;
+	
+	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_block_bitmap)+start_sector*sector_size_bytes;
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
+
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+	
+	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_inode_bitmap)+start_sector*sector_size_bytes;
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
+
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=read(device,inode_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+
 }
 void print_superBlock(struct ext2_super_block* s)
 {
@@ -606,7 +654,7 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 				//dots++;	
 				if(!strcmp(dir->name,".")) {
 				//	p=dir->inode;
-					printf("%s\n",dir->name);
+					//printf("%s\n",dir->name);
 					checkItself(dir,n);
 					
 				}
@@ -614,7 +662,7 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 				
 			memcpy(file_name,dir->name,dir->name_len);
 			file_name[dir->name_len]='\0';
-			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
 					checkParent(dir,p);	
 						
@@ -627,9 +675,9 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 				file_name[dir->name_len]='\0';
 				if(!strcmp(file_name,"lost+found")){
 					lost_and_found=dir->inode;
-					printf("LostFoundThe inode number is %d and %s\n",dir->inode,file_name);
+					//printf("LostFoundThe inode number is %d and %s\n",dir->inode,file_name);
 				}
-				printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
+				//printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
 				
 				dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
 //			printf("%s/",dir->name);
@@ -661,7 +709,7 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 	
 #endif	
     }
- 
+		free(current); 
 		return current;
 //#endif
 }
@@ -710,7 +758,9 @@ void checkUnreferenced(int n)
 	static int level=0;
 	static unsigned int link_count=0;
 	static unsigned char* bitmap;
+	
 	current=read_inode(n);
+	
 	if(current==NULL) {
 		return;
 	}
@@ -794,18 +844,19 @@ void checkMap(unsigned char* bitmap)
 {
 	int i=0;
 	struct ext2_inode* current;//; malloc(sizeof(struct ext2_inode));
-	printf("checkMap, %d\n",super->s_inodes_count);
+//	printf("checkMap, %d\n",super->s_inodes_count);
 	for(i=2;i < super->s_inodes_count;i++)
 	{
 		
 		current=read_inode(i);
 		if((S_ISDIR(current->i_mode))) {
-		printf("D %d\n",i);	
-			if( (checkAllocated(bitmap,i)==1) )//&& (checkAllocated(inode_bitmap,i)==1) )
+		//printf("D %d\n",i);
+				getBitMap(i);	
+			if( (checkAllocated(bitmap,i)==1) && (checkAllocated(inode_bitmap,i)==1) )
 					;
 			else{
 				
-				printf("Unreferenced inode %d\n",i);
+				printf("Unreferenced inode %d adding it to /lost+found\n",i);
 				addToLostAndFound(i);
 			}
 		}
@@ -843,7 +894,7 @@ void addToLostAndFound(int inode)
 		if(dir==NULL) return;
 		read_device(device,dsector,2,buf);
 		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d block[%d]:%d Size:%d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,i,current->i_block[i],current->i_size);
+		//printf(" INODE Number is %d Name is: %s Rec %d dir_type %d block[%d]:%d Size:%d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,i,current->i_block[i],current->i_size);
 		block=dir->rec_len;		
 #endif
 	
@@ -851,14 +902,14 @@ void addToLostAndFound(int inode)
 	//	while(dir->inode!=0) 
 	while(dir->inode!=0) {
 #if 1	
-						printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 		//checkAllocated(inode_bitmap,dir->inode);	
 		//setBit(bitmap,dir->inode);
 			if( dir->file_type==2 ) {
 				
 				//setBit(bitmap,dir->inode);
 		//		if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-				printf(" JJ:: %s\n",dir->name);	
+			//	printf(" JJ:: %s\n",dir->name);	
 		//				prev=dir;		
 				//		printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 		//		printf("present\n");		
@@ -880,7 +931,7 @@ void addToLostAndFound(int inode)
 			
 			block+=dir->rec_len;		
 		}
-	printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
+//	printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
 
 #if 1
 	 
@@ -896,7 +947,7 @@ void addToLostAndFound(int inode)
 			//dir->rec_len=(dir->rec_len-i+4);		
 				
 		dir->name_len=strlen(dir->name);
-		printf("%s strlen: %lu dir_name %d\n",dir->name,strlen(dir->name),dir->name_len);
+		//printf("%s strlen: %lu dir_name %d\n",dir->name,strlen(dir->name),dir->name_len);
 		if((i=prev->rec_len%4)!=0)
 			prev->rec_len=(prev->rec_len-i+4);	
 	    dir->rec_len=in_buf-prev->rec_len;
@@ -926,8 +977,10 @@ void addToLostAndFound(int inode)
 }
 void setBit(unsigned char* bitmap,int inode)
 {
-	int group_no= inode/inodes_per_group;
-	int inode_off = inode - (group_no*inodes_per_group) -1;
+	//int group_no= inode/inodes_per_group;
+	//int inode_off = inode - (group_no*inodes_per_group) -1;
+	int group_no= (inode-1)/inodes_per_group;
+	int inode_off = (inode-1) %inodes_per_group;
 	int bit_map_index;	
 	int shift_index;
 	bit_map_index = (inode_off)/8;
@@ -939,8 +992,10 @@ void setBit(unsigned char* bitmap,int inode)
 }
 void unsetBit(unsigned char* bitmap,int inode)
 {
-	int group_no= inode/inodes_per_group;
-	int inode_off = inode - (group_no*inodes_per_group) -1;
+	//int group_no= inode/inodes_per_group;
+	//int inode_off = inode - (group_no*inodes_per_group) -1;
+	int group_no= (inode-1)/inodes_per_group;
+	int inode_off = (inode-1) %inodes_per_group;
 	int bit_map_index;	
 	int shift_index;
 	bit_map_index = (inode_off-1)/8;
@@ -967,6 +1022,7 @@ int checkAllocated(unsigned char* bitmap,int inode)
 	else{
 			
 		printf("%d Not allocated \n",inode);
+		
 		return 0;
 	}
 
@@ -977,11 +1033,147 @@ void checkBitMap(void)
 {
 
 }
-void checkLinkCount(void)
+
+
+void clearHashMap(unsigned int* hash_map)
 {
+	int i=0;
+	for(i=0;i<=total_inodes;i++)
+		hash_map[i]=0;
+	
+}
+void checkLinkCount(int inode)
+{
+	
+	struct ext2_inode* current=NULL;
+	char buf[BASE_OFFSET*20];
+	struct ext2_dir_entry_2* dir=NULL;
+	unsigned int sector=0;
+	unsigned int dsector=0;
+	unsigned int offset;
+	unsigned int block=0;
+    unsigned int dots=0;
+	unsigned int i=0;
+	unsigned int in_buf=0;	
+	static unsigned link_count=0;
+	static int level=1;
+	char file_name[EXT2_NAME_LEN+1];
+	static unsigned int* hash_map;
+	//current=malloc(sizeof(struct ext2_inode));
+	current=read_inode(inode);
+    
+	if(!link_count)	{
+		hash_map=calloc((total_inodes+1),sizeof(unsigned int));
+		clearHashMap(hash_map);
+	}
+	if(current==NULL) {
+		//print_inode(current);
+		return;
+	}
+	link_count++;
+	dir=malloc(sizeof(struct ext2_dir_entry_2));
+	//printf("INODE %d links count %d\n",inode,current->i_links_count);
+	//printf("%d\n",6/8);
+	for(;current->i_block[i]!=0;i++){
+#if 1 
+		in_buf=0;	
+		block=current->i_block[i];
+		block=BLOCK_OFFSET(block);
+		dsector=block/sector_size_bytes;
+		dsector+=start_sector;
+//	printf("The sector is %d\n",sector);
+		if(dir==NULL) return ;
+		read_device(device,dsector,2,buf);
+		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
+//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		block=dir->rec_len;		
+#endif
+	
+#if 1		
+	while(dir->inode!=0) {
+//	while(block < current->i_size) 
+#if 1
+			hash_map[dir->inode]++;
+		if( dir->file_type==2 ) {
+
+			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+				//dots++;	
+		//		if(!strcmp(dir->name,".")) {
+				//	p=dir->inode;
+	//				printf("%s\n",dir->name);
+	//				checkItself(dir,n);
+					
+	//			}
+			//	else {
+				
+			//memcpy(file_name,dir->name,dir->name_len);
+			//file_name[dir->name_len]='\0';
+		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		//	dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
+			//		checkParent(dir,p);	
+						
+				//	p=dir->inode;
+			//	}
+			}		
+			else { 
+			
+	//		printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			checkLinkCount(dir->inode);	
+			//printf("\n");
+			}
+#endif
+		//	if(do_copy){
+		//		printf("-----DO COPY!!!!------------\n");
+#if 1 	//	
+		//		memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
+		//		write_sectors(dsector,2,(buf));
+#endif		
+		//		do_copy=0;
+		//	}
+	
+	}	
+		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+		in_buf+=block;
+		block+=dir->rec_len;		
+	}
+	
+#endif	
+    }
+ 
+//		return current;
+	free(dir);
+	free(current);
+	link_count--;
+	if(link_count==0)	
+		checkHash(hash_map);
+}
+void checkHash(unsigned int* hash_map)
+{
+	int i=ROOT;
+	struct ext2_inode* current=NULL;
+	for(i=2;i <= total_inodes;i++)
+	{
+		
+		current=read_inode(i);
+		if(current->i_links_count == hash_map[i]) {
+				
+				free(current);
+			
+		}else{
+				printf("Link count for %d doesnt match should be %u and is %d. Changing.\n",i,hash_map[i],current->i_links_count);
+				current->i_links_count=hash_map[i];
+				write_inode(i,current);
+				free(current);	
+		}
+		
+		
+
+
+	}
 
 
 }
+
 void print_inode(struct ext2_inode* inode)
 {	
 	int i=0;
@@ -1017,7 +1209,7 @@ void addCP(int n,int c,int p)
 
 	}
 
-	print_inode(current);	
+	//print_inode(current);	
 	//printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count);
 	//printf("%d\n",6/8);
 	for(;current->i_block[i]!=0;i++){
@@ -1040,6 +1232,7 @@ void addCP(int n,int c,int p)
 		dir->inode=p;
 		memcpy(buf+in_buf,dir,sizeof(struct ext2_dir_entry_2));
 		write_sectors(dsector,2,buf);
+		free(dir);
 		break;
 	} 
 
@@ -1050,28 +1243,13 @@ void addCP(int n,int c,int p)
 struct ext2_inode* read_inode( int inode_no)
 {
 
-int group_no = inode_no/super->s_inodes_per_group;
-int inode_offs = inode_no - (group_no * inodes_per_group) - 1;
-struct ext2_inode* current=malloc(sizeof(struct ext2_inode));
-unsigned int sector=0;
-unsigned int current_block = GET_BLOCK_GROUP(inode_no); 	
-unsigned int i=0;
-unsigned int add_sectors = ((current_block*blocks_per_group*2));
-unsigned int in_buf=0;	
-unsigned int offset=0;	
-	add_sectors+=start_sector;
-	sector=INODE_TO_SECTOR(GET_INDEX(inode_no));
-	sector+=add_sectors;
-	if(ROUNDS_OFF(GET_INDEX(inode_no))){
-		offset=0;
-//		printf("It does\n");
-	}
-	else{
-		offset=GET_OFFSET(inode_no);
-	//	printf("It doesnt offset is %d\n",offset);
-	}
-
-	lseek64(device,(sector*sector_size_bytes+offset), SEEK_SET);
+	int group_no= (inode_no-1)/inodes_per_group;
+	int inode_off = (inode_no-1) %inodes_per_group;
+	struct ext2_inode* current=malloc(sizeof(struct ext2_inode));
+	unsigned int go_to=0;
+	
+	go_to=BLOCK_OFFSET(group_desc[group_no].bg_inode_table)+(start_sector*sector_size_bytes)+inode_off*inode_size;
+	lseek64(device,go_to, SEEK_SET);
 
 	read(device, current, sizeof(struct ext2_inode));
 	return current;
@@ -1080,34 +1258,14 @@ unsigned int offset=0;
 void write_inode(int inode_no,struct ext2_inode* i)
 {
 
-	int group_no = inode_no/super->s_inodes_per_group;
-	int inode_offs = inode_no - (group_no * inodes_per_group) - 1;
-//	struct ext2_inode* current=malloc(sizeof(struct ext2_inode));
-	unsigned int sector=0;
-	unsigned int current_block = GET_BLOCK_GROUP(inode_no); 	
-	//unsigned int i=0;
-	unsigned int add_sectors = ((current_block*blocks_per_group*2));
-	unsigned int in_buf=0;	
-	unsigned int offset=0;	
+	int group_no= (inode_no-1)/inodes_per_group;
+	int inode_off = (inode_no-1) %inodes_per_group;
+	//struct ext2_inode* current=malloc(sizeof(struct ext2_inode));
+	unsigned int go_to=0;
 	
-	add_sectors+=start_sector;
-	sector=INODE_TO_SECTOR(GET_INDEX(inode_no));
-	sector+=add_sectors;
+	go_to=BLOCK_OFFSET(group_desc[group_no].bg_inode_table)+(start_sector*sector_size_bytes)+inode_off*inode_size;
+	lseek64(device,go_to, SEEK_SET);
+
+	write(device, i, sizeof(struct ext2_inode));
 	
-	if(ROUNDS_OFF(GET_INDEX(inode_no))){
-		offset=0;
-//		printf("It does\n");
-	}
-	else{
-		offset=GET_OFFSET(inode_no);
-	//	printf("It doesnt offset is %d\n",offset);
-	}
-
-	lseek64(device,(sector*sector_size_bytes+offset), SEEK_SET);
-
-	//read(device, current, sizeof(struct ext2_inode));
-	write(device,i,sizeof(struct ext2_inode));	
-	
-
-
 }
