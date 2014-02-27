@@ -55,7 +55,7 @@ static unsigned int block_size;
 static unsigned char* block_bitmap;
 #define INODE_BITMAP
 static unsigned char* inode_bitmap;
-
+static unsigned int* my_hash_map;
 // n -> inode number
 //offset -> disk offset to get inode number
 #define BLOCK_OFFSET(block)  (BASE_OFFSET + (block-1)*block_size)
@@ -83,6 +83,7 @@ static unsigned total_block_count;
 static unsigned int do_copy=0;
 static unsigned lost_and_found;
 static unsigned group_count;
+static int level_dir=1;
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -110,10 +111,10 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int parent);
 void checkDirectories(void);
 void checkUnreferenced(int n);
 void clearHashMap(unsigned int* hash_map);
-void checkItself(struct ext2_dir_entry_2* dir,int itself);
+int checkItself(struct ext2_dir_entry_2** dir,int itself);
 void checkLinkCount(int inode);
-void checkBitMap(void);
-void checkParent(struct ext2_dir_entry_2* dir,int parent);
+void checkBitMap(int inode);
+int  checkParent(struct ext2_dir_entry_2** dir,int parent);
 struct ext2_inode* read_inode( int inode_no);
 void write_inode(int inode_no,struct ext2_inode* i);
 void unsetBit(unsigned char* bitmap,int inode);
@@ -123,7 +124,16 @@ void checkMap(unsigned char* bitmap);
 void addToLostAndFound(int inode);
 void addCP(int inode,int c,int p);
 void checkHash(unsigned int* hash_map);
-void getBitMap(int group_no);
+void getBitMapForInode(int inode);
+void getBitMapForBlock(int block_no);
+int checkBlockAllocated(int block);
+void write_block(int block,unsigned char* buf);
+void* read_block(int block);
+void checkUnreferencedCount(void);
+int getFileType(int inode);
+int getEntrySize(char * name);
+int getBlock(int inode);
+void print_directories(int inode);
 
 void print_inode(struct ext2_inode* inode);
 	
@@ -310,7 +320,7 @@ void checkForExtended(struct partition_table** head)
 			}
 			
  			t=temp1->p.start_sect + offset;
-		
+			free(temp1);		
 			read_device(device,t,1,buf);
 			} //while	
 		} //if
@@ -348,7 +358,8 @@ void addToList(struct partition_table** head,struct partition_table* current)
 void checkFS(int f)
 {
 	struct partition_table* temp=NULL;
-	int i=1;
+	static int i=1;
+	
 	buildList(&head,ZERO);		
 	assign_partition(&head);	
 	
@@ -407,23 +418,21 @@ void startCheck(struct partition_table* temp)
 						checkDirectories();
 					//	lost_and_found=11;
 						printf("----------------- 1 PASSS--------------------------------\n");
-						pass++;
-						break;
+						
 					case 2:
 						checkUnreferenced(ROOT);
+						checkUnreferencedCount();
 						printf("-----------------  PASSS 2--------------------------------\n");
 						//checkUnreferenced(ROOT);
-						pass++;
-						break;
+						
 					case 3:
 						checkLinkCount(ROOT);
-						pass++;
-						break;
+						
 					case 4:
-						checkBitMap();
-						pass++;
-						break;
+						//checkBitMap(ROOT);
+						
 					default:
+							pass=4;
 							break;
 
 
@@ -493,69 +502,19 @@ void readGroupDescriptor(char* buf)
 	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc)*group_count);
 	first_block=BLOCK_OFFSET(group_desc->bg_inode_table);
 	block_bitmap=malloc(block_size);
-#if 0		
-	sector_offset=BLOCK_OFFSET(group_desc->bg_block_bitmap)+start_sector*sector_size_bytes;
-	
-	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
-
-		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,lret);
-		exit(-1);
-	}
-	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
-		
-		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,ret);
-		exit(-1);
-
-	}
-#endif
 	inode_bitmap=malloc(block_size);
-#if 0
-	sector_offset=BLOCK_OFFSET(group_desc->bg_inode_bitmap)+start_sector*sector_size_bytes;
-	
-	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
-
-		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,lret);
-		exit(-1);
-	}
-	if( (ret=read(device,inode_bitmap,block_size))!=block_size) {
-		
-		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,ret);
-		exit(-1);
-
-	}
-#endif
-//	checkAllocated(inode_bitmap,200);	
-//	print_groupDescriptor(group_desc);
+	my_hash_map=calloc((total_inodes+1),sizeof(int));
 	dbg_p("First block %d\n",first_block);
 	
 }
-void getBitMap(int inode)
+void getBitMapForInode(int inode)
 {
 	int64_t lret;
 	int64_t sector_offset;
 	ssize_t ret;
 	int group_no= (inode-1)/inodes_per_group;
 	int inode_off = (inode-1) %inodes_per_group;
-	
-	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_block_bitmap)+start_sector*sector_size_bytes;
-	
-	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
 
-		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,lret);
-		exit(-1);
-	}
-	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
-		
-		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
-				"returned %"PRId64"\n",__func__,sector_offset,ret);
-		exit(-1);
-
-	}
 	
 	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_inode_bitmap)+start_sector*sector_size_bytes;
 	
@@ -573,6 +532,33 @@ void getBitMap(int inode)
 
 	}
 
+}
+
+
+void getBitMapForBlock(int block)
+{
+	int64_t lret;
+	int64_t sector_offset;
+	ssize_t ret;
+	int group_no= (block-1)/blocks_per_group;
+	int block_off = (block-1) %blocks_per_group;
+	
+	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_block_bitmap)+start_sector*sector_size_bytes;
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
+
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+	
 }
 void print_superBlock(struct ext2_super_block* s)
 {
@@ -608,16 +594,13 @@ void print_groupDescriptor(struct ext2_group_desc* gd)
 struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 {
 	struct ext2_inode* current=NULL;
-	char buf[BASE_OFFSET*8];
+	unsigned char* buf;
 	struct ext2_dir_entry_2* dir=NULL;
-	unsigned int sector=0;
-	unsigned int dsector=0;
 	unsigned int offset;
 	unsigned int block=0;
-    unsigned int dots=0;
 	unsigned int i=0;
 	unsigned int in_buf=0;	
-	static int level=1;
+	
 	char file_name[EXT2_NAME_LEN+1];
 	//current=malloc(sizeof(struct ext2_inode));
 	current=read_inode(n);
@@ -626,45 +609,38 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 		return;
 	}
 	//printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count);
-	//printf("%d\n",6/8);
 	for(;current->i_block[i]!=0;i++){
-#if 1 
+ 
 		in_buf=0;	
 		block=current->i_block[i];
-		block=BLOCK_OFFSET(block);
-		dsector=block/sector_size_bytes;
-		dsector+=start_sector;
-//	printf("The sector is %d\n",sector);
-		dir=malloc(sizeof(struct ext2_dir_entry_2));
-		if(dir==NULL) return NULL;
-		read_device(device,dsector,2,buf);
-		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		block=dir->rec_len;		
-#endif
-	
+		buf=(unsigned char*)read_block(block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
+		size=0;	
 #if 1		
-	while(dir->inode!=0) {
-//	while(block < current->i_size) 
+//	while(dir->inode!=0) 
+	while(size < block_size && dir->inode!=0) { 
 #if 1
 	
 		if( dir->file_type==2 ) {
 
 			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-				//dots++;	
+				
 				if(!strcmp(dir->name,".")) {
-				//	p=dir->inode;
+					//	p=dir->inode;
 					//printf("%s\n",dir->name);
-					checkItself(dir,n);
+					if(checkItself(&dir,n))
+						write_block(block,buf);
 					
 				}
 				else {
 				
-			memcpy(file_name,dir->name,dir->name_len);
-			file_name[dir->name_len]='\0';
-//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
-					checkParent(dir,p);	
+					memcpy(file_name,dir->name,dir->name_len);
+					file_name[dir->name_len]='\0';
+//					printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+					dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
+					if(checkParent(&dir,p))
+						write_block(block,buf);	
 						
 				//	p=dir->inode;
 				}
@@ -673,74 +649,83 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 			
 				memcpy(file_name,dir->name,dir->name_len);
 				file_name[dir->name_len]='\0';
+					
 				if(!strcmp(file_name,"lost+found")){
+					
 					lost_and_found=dir->inode;
 					//printf("LostFoundThe inode number is %d and %s\n",dir->inode,file_name);
 				}
-				//printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
+				printf("%s:INODE Number is %d Name is: %s Rec %d dir_type %d\n",__func__,dir->inode,file_name,dir->rec_len,dir->file_type);
 				
-				dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
-//			printf("%s/",dir->name);
+			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
+			//printf("%s/",dir->name);
 //	if(dots==2)
 //		printf("\nDirectory has parent and self!\n");
-			if(level<2)
-				p=2;
-			else
+			//	if(level_dir<2)
+			//		p=2;
+			//	else
+			//		p=n;		
+			//	level_dir++;
 				p=n;		
-			level++;
-			checkInode(dir->inode,p);	
+				checkInode(dir->inode,p);	
 			//printf("\n");
 			}
 #endif
-			if(do_copy){
-				printf("-----DO COPY!!!!------------\n");
-#if 1 		
-				memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
-				write_sectors(dsector,2,(buf));
-#endif		
-				do_copy=0;
-			}
 	
-	 }
-		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-		in_buf+=block;
-		block+=dir->rec_len;		
+	 	}
+		
+		dir=(void*)dir+dir->rec_len;
+		size+=dir->rec_len;
 	}
-	
-#endif	
+			/*if(do_copy){
+				printf("-----DO COPY!!!!------------\n");
+ 		
+			//	memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
+			//	write_sectors(dsector,2,(buf));
+				write_block(block,buf);
+				do_copy=0;
+				print_directories(11);
+			}
+		*/
+#endif
+		free(buf);		
     }
 		free(current); 
 		return current;
 //#endif
 }
-void checkItself(struct ext2_dir_entry_2* dir,int itself)
+int checkItself(struct ext2_dir_entry_2** dir,int itself)
 {
-	if(dir->inode==itself)
-		 return;
+	if((*dir)->inode==itself)
+		 return 0;
 	else{
 		do_copy=1;
 		printf("BAD inode number for '.'.\nChange inode number of '.' to %d",itself);
-		dir->inode=itself;
-	
+		(*dir)->inode=itself;
+		return 1;	
 	}
+
 }
 
-void checkParent(struct ext2_dir_entry_2* dir,int parent)
+int checkParent(struct ext2_dir_entry_2** dir,int parent)
 {
 
-	if(dir->inode==parent)
-;//		dbg_p("Points to parent\n");
+	if((*dir)->inode==parent)
+		return 0;//		dbg_p("Points to parent\n");
+	
 	else {
 		do_copy=1;
-		printf("BAD PARENT POINTER for '..'\nChange inode number of '..' to %d\n",parent);		dir->inode=parent;
-
+		printf("BAD PARENT POINTER for '..'\nChange inode number of '..' to %d\n",parent);		
+		(*dir)->inode=parent;
+		return 1;
 	}
 
 
 }
+
 void checkDirectories(void)
 {
-
+	level_dir=1;
 	checkInode(2,2); //2-->ROOT,2-->PARENT
 	
 
@@ -749,7 +734,7 @@ void checkUnreferenced(int n)
 {
 	
 	struct ext2_inode* current=NULL;
-	char buf[BASE_OFFSET*8];
+	char* buf;
 	struct ext2_dir_entry_2* dir=NULL;
 	unsigned int dsector=0;
 	unsigned int block=0;
@@ -758,7 +743,6 @@ void checkUnreferenced(int n)
 	static int level=0;
 	static unsigned int link_count=0;
 	static unsigned char* bitmap;
-	
 	current=read_inode(n);
 	
 	if(current==NULL) {
@@ -766,78 +750,84 @@ void checkUnreferenced(int n)
 	}
 	if(!level){
 	//	printf("Gotcha!");
-		bitmap=calloc(1,block_size);
 		level=1;
 	}
-			link_count++;
+	link_count++;
 	//printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count);
 	for(;current->i_block[i]!=0;i++){
-#if 1 
+
+		in_buf=0;	
 		block=current->i_block[i];
-		block=BLOCK_OFFSET(block);
-		dsector=block/sector_size_bytes;
-		dsector+=start_sector;
-//	printf("The sector is %d\n",sector);
-		dir=malloc(sizeof(struct ext2_dir_entry_2));
-		if(dir==NULL) return;
-		read_device(device,dsector,2,buf);
-		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		block=dir->rec_len;		
-#endif
-	
+		buf=read_block(block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
 #if 1		
-	while(dir->inode!=0) {
-//	while(block < current->i_size) 
-#if 1	
-		//checkAllocated(inode_bitmap,dir->inode);	
-		//setBit(bitmap,dir->inode);
-		if( dir->file_type==2 ) {
+		while(size < block_size && dir->inode!=0) {
+#if 1		
+			my_hash_map[dir->inode]++;	
+			
+			if( dir->file_type==2 ) {
 				
-		setBit(bitmap,dir->inode);
-			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+			
+				if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
 					
 					
 	
-			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,p);
+					dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,p);
 						
-			}		
-			else {
-			checkUnreferenced(dir->inode);	
+				}		
+				else {
+					checkUnreferenced(dir->inode);	
 			
-		}
+				}
 #endif
 	
-	 }
-		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-		in_buf+=block;
-		block+=dir->rec_len;		
-	}
+	 		}
 		
-			
+		//memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+		dir=(void*)dir+dir->rec_len;
+		size+=dir->rec_len;
+		}
+		dbg_p("Here\n");	
+		free(buf);	
 #endif	
     }
+	
+	free(current);	
 	link_count--;
-	if(link_count==0)	
-		checkMap(bitmap);
-#if 0	
-	if(link_count==current->i_links_count) {
-	
-		//printf("INODE NUMBER IS %d\n",n);
-//		printf("___LINK COUNT MATCHES_____\n");
-//	printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d my_links %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count,link_count);
-	}
-	else{
-	
-//		printf("LINK COUNT DOES NOT MATCH for INODE %d \n",n);
-//	printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d my_links %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count,link_count);
-///		printf("CHANGING THE LINK COUNT FROM %d to %d",current->i_links_count,link_count);
-//		current->i_links_count=link_count;
-		//write_inode(n,current);	
-	
-	}
-#endif
+	//if(link_count==0)	
+	//	checkUnreferencedCount();
 
+
+}
+void checkUnreferencedCount(void)
+{
+	int i=0;
+	struct ext2_inode* current=NULL;
+	for(i=2;i<super->s_inodes_count;i++)
+	{
+		current=read_inode(i);
+		//if((S_ISDIR(current->i_mode))) {
+				
+				if(current->i_links_count!=0 && my_hash_map[i]==0)
+				{
+					addToLostAndFound(i);
+				printf("Unreferenced inode %d adding it to /lost+found\n",i);
+				my_hash_map[i]++;	
+				
+				if(S_ISDIR(current->i_mode)) {
+				
+					checkInode(i,lost_and_found);
+					//checkDirectories();
+					//clearHashMap(my_hash_map);
+					checkUnreferenced(i);;	
+				
+				}
+	
+				}	
+		//}
+			free(current);
+	}
 
 }
 void checkMap(unsigned char* bitmap)
@@ -851,21 +841,26 @@ void checkMap(unsigned char* bitmap)
 		current=read_inode(i);
 		if((S_ISDIR(current->i_mode))) {
 		//printf("D %d\n",i);
-				getBitMap(i);	
+				getBitMapForInode(i);	
 			if( (checkAllocated(bitmap,i)==1) && (checkAllocated(inode_bitmap,i)==1) )
 					;
 			else{
+			//	if(checkAllocated(inode_bitmap,i)==0)
+			//		continue;
 				
 				printf("Unreferenced inode %d adding it to /lost+found\n",i);
 				addToLostAndFound(i);
-			}
+				checkDirectories();
+				checkUnreferenced(i);
+					
+				}
 		}
 		free(current);
 	}	
 
 }
 
-void addToLostAndFound(int inode)
+int getBlock(int inode)
 {
 
 	struct ext2_inode* current=NULL;
@@ -879,100 +874,191 @@ void addToLostAndFound(int inode)
 	struct ext2_dir_entry_2* dir=NULL;
 	char* tracker=NULL;	
 	current=read_inode(lost_and_found);
-	buf=malloc(current->i_size);
-	prev=malloc(sizeof(struct ext2_dir_entry_2));
+	char file_name[EXT2_NAME_LEN+1]={0};
+	sprintf(file_name,"%d",inode);
+	int est_size=getEntrySize(file_name);
+	int est_len=0;
+	//buf=malloc(current->i_size);
+	//prev=malloc(sizeof(struct ext2_dir_entry_2));
 	for(;current->i_block[i]!=0;i++) {
-#if 1
+
 		in_buf=0; 
 		block=current->i_block[i];
-		block=BLOCK_OFFSET(block);
-		dsector=block/sector_size_bytes;
-		dsector+=start_sector;
-	
-//	printf("The sector is %d\n",sector);
-		dir=malloc(sizeof(struct ext2_dir_entry_2));
-		if(dir==NULL) return;
-		read_device(device,dsector,2,buf);
-		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-		//printf(" INODE Number is %d Name is: %s Rec %d dir_type %d block[%d]:%d Size:%d\n",dir->inode,dir->name,dir->rec_len,dir->file_type,i,current->i_block[i],current->i_size);
-		block=dir->rec_len;		
-#endif
-	
-#if 1		
-	//	while(dir->inode!=0) 
-	while(dir->inode!=0) {
-#if 1	
-			//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		//checkAllocated(inode_bitmap,dir->inode);	
-		//setBit(bitmap,dir->inode);
-			if( dir->file_type==2 ) {
-				
-				//setBit(bitmap,dir->inode);
-		//		if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-			//	printf(" JJ:: %s\n",dir->name);	
-		//				prev=dir;		
-				//		printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		//		printf("present\n");		
-		///		}		
-		//		else {
-			
-				//prev=dir;
-			memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
-			//checkUnreferenced(dir->inode);	
-			
-			//	}
-#endif
-	
-			}	
-	
-			in_buf=dir->rec_len;
-			tracker=buf+block;
-			memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-			
-			block+=dir->rec_len;		
-		}
-//	printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
+		buf=read_block(block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
+		
 
-#if 1
-	 
-	if(prev->rec_len>=10)
-	{
 		
-		dir->inode=inode;
-		sprintf(dir->name,"%d",dir->inode);
-		//dir->rec_len=in_buf;//(strlen(dir->name)+1+8);
-		
-		prev->rec_len=(prev->name_len+1+8);	
-	//	if((i=dir->rec_len%4)!=0)
-			//dir->rec_len=(dir->rec_len-i+4);		
+		while(size < block_size && dir->inode!=0) {
+
+				printf("%s: INODE Number is %d Name is: %s Rec %d dir_type %d \n",__func__,dir->inode,dir->name,dir->rec_len,dir->file_type);
+			
+					
+			//	if( dir->file_type==2 ) {
 				
-		dir->name_len=strlen(dir->name);
-		//printf("%s strlen: %lu dir_name %d\n",dir->name,strlen(dir->name),dir->name_len);
-		if((i=prev->rec_len%4)!=0)
-			prev->rec_len=(prev->rec_len-i+4);	
-	    dir->rec_len=in_buf-prev->rec_len;
-		dir->file_type=2;
-		
+			//		memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
 	
-		printf("Size of %lu %lu\n",sizeof(prev),sizeof(dir->name));
-		memcpy((buf+(1024-in_buf)),prev,sizeof(struct ext2_dir_entry_2));
-		memcpy((buf+(1024-in_buf+prev->rec_len)),dir,sizeof(struct ext2_dir_entry));
-		//addCP(inode,inode,lost_and_found);
-		write_sectors(dsector,2,(buf));
-		addCP(inode,inode,lost_and_found);
-    	return;
+			//	}	
+			est_len=getEntrySize(dir->name);
+			if(dir->rec_len-est_len >=est_size) {
+						
+					free(buf);
+					free(current);
+					return block;
+			}
+			//in_buf=dir->rec_len;
+			dir=(void*)dir+dir->rec_len;
+			size+=dir->rec_len;
+		}
+	//printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
+		free(buf);
 	}
-#endif			
-#endif	
+		free(current);
+}
+int getEntrySize(char * name)
+{
+	int len=0;
+	int i=0;
+	len=8+strlen(name); 
+	
+	if((i=len%4)!=0)
+		len=len-i+4;
+
+
+	return len;
+}
+int getFileType(int inode)
+{
+	struct ext2_inode* current=NULL;
+	//int file_type=0;
+	int m;
+	current=read_inode(inode);
+	m=current->i_mode;
+	int file_type=0;
+	
+	if(S_ISREG(m))
+		file_type=1; 
+	else if( S_ISDIR(m))
+		 file_type=2; 
+	else if ( S_ISCHR(m))
+		file_type=3; 
+	else if( S_ISBLK(m))
+		file_type=4; 
+	else if( S_ISFIFO(m))
+		file_type=5; 
+	else if(S_ISSOCK(m))
+		file_type=6; 
+	else if( S_ISLNK(m))
+		file_type=7; 
+	
+	free(current);
+	return file_type;
+}
+
+void addToLostAndFound(int inode)
+{
+
+	unsigned char* buf;
+	//char* buf[];
+	int i=0;
+	int block=0;
+	struct ext2_dir_entry_2* dir;
+	int get_block=getBlock(inode);	
+	char file_name[EXT2_NAME_LEN+1]={0};
+	sprintf(file_name,"%d",inode);
+	int est_size=getEntrySize(file_name);
+	int est_len=0;
+	int new_rec_len=0;
+
+		buf=read_block(get_block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
 		
-}	
-//	printf("PREV is %d\n",prev->inode);		
-//	memcpy(buf+in_buf,)
-//	dir->inode=inode;
-//	dir->name=		
+
+		
+	while(size < block_size && dir->inode!=0) {
+
+						//printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			
+	//		if( dir->file_type==2 ) {
+				
+	//		memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
+	
+	//		}	
+			est_len=getEntrySize(dir->name);
+			
+			if(dir->rec_len-est_len >=est_size) {
+					
+					new_rec_len=dir->rec_len-est_len;
+					break;	
+								
+			}
+	
+			dir=(void*)dir+dir->rec_len;
+			size+=dir->rec_len;
+	}
+	
+	dir->rec_len=est_len;
+	dir=(void*)dir+dir->rec_len;
+	dir->inode=inode;
+	sprintf(dir->name,"%d",inode);
+	dir->file_type=getFileType(inode);	
+	dir->rec_len=new_rec_len;
+	dir->name_len=strlen(dir->name);
+	write_block(get_block,buf);	
+//	print_directories(11);
+	free(buf);
 		
 		
+
+}
+void print_directories(int inode)
+{
+	struct ext2_inode* current;
+	current=read_inode(inode);
+	struct ext2_dir_entry_2* dir;
+	unsigned char* buf;
+	int i=0;	
+	int block=0;
+	printf("***************** %s *************\n",__func__);
+	for(;current->i_block[i]!=0;i++) {
+
+		block=current->i_block[i];
+		buf=read_block(block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
 		
+
+		
+		while(size < block_size && dir->inode!=0) {
+
+				printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			
+					
+				if( dir->file_type==2 ) {
+				
+			//		memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
+					if(!(strcmp(dir->name,".."))|| !(strcmp(dir->name,".")));
+					else {
+							printf("%s/",dir->name);
+							print_directories(dir->inode);
+						}
+					}	
+			
+			//in_buf=dir->rec_len;
+			dir=(void*)dir+dir->rec_len;
+			size+=dir->rec_len;
+		}
+		printf("\n");
+	//printf("Inbuf:%d rec_len:%d\n",in_buf,prev->rec_len); 		
+		free(buf);
+	}
+		free(current);
+	
+
+	printf("***************** %s *************\n",__func__);
+
 
 }
 void setBit(unsigned char* bitmap,int inode)
@@ -1029,11 +1115,138 @@ int checkAllocated(unsigned char* bitmap,int inode)
 
 
 }
-void checkBitMap(void)
+int checkBlockAllocated(int block)
 {
+
+	int group_no= (block-1)/blocks_per_group;
+	int block_off = (block-1) %blocks_per_group;
+	int bit_map_index;	
+	int shift_index;
+	bit_map_index = (block_off)/8 ;
+	shift_index=(block_off)%8;
+		
+	getBitMapForBlock(block);		
+//	printf("Bit_map_index %d\nShift Index %d\nInode_off %d Bitmap %d\n",bit_map_index,shift_index,inode_off,bitmap[bit_map_index]);
+	
+	if( (((block_bitmap[bit_map_index])&(1<<shift_index)))) {
+			
+			//printf("block %d aLlocated!\n",block);
+			return 1;
+	}
+	else{
+			
+		//printf("%d Not allocated \n",block);
+		
+		return 0;
+	}
 
 }
 
+
+void checkBitMap(int inode)
+{
+
+	struct ext2_inode* current=NULL;
+	char buf[BASE_OFFSET*20];
+	struct ext2_dir_entry_2* dir=NULL;
+	unsigned int sector=0;
+	unsigned int dsector=0;
+	unsigned int offset;
+	unsigned int block=0;
+    unsigned int dots=0;
+	unsigned int i=0;
+	unsigned int in_buf=0;	
+	//static unsigned link_count=0;
+	//static int level=1;
+	char file_name[EXT2_NAME_LEN+1];
+	
+//	static unsigned int* hash_map;
+
+	current=read_inode(inode);
+
+	dir=malloc(sizeof(struct ext2_dir_entry_2));
+	for(;current->i_block[i]!=0;i++){
+#if 1 
+		in_buf=0;	
+		block=current->i_block[i];
+		block=BLOCK_OFFSET(block);
+		dsector=block/sector_size_bytes;
+		dsector+=start_sector;
+		printf("Block[i]: %d\n",current->i_block[i]);	
+		if(checkBlockAllocated(current->i_block[i])){
+				
+			//	printf("Yes allocated\n");		
+
+
+		}
+		else{
+
+				printf("No block %d not allocated\n",current->i_block[i]);
+		}	
+		if(dir==NULL) return ;
+		read_device(device,dsector,2,buf);
+		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
+//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		block=dir->rec_len;		
+#endif
+	
+#if 1		
+	while(dir->inode!=0) {
+//	while(block < current->i_size) 
+#if 1
+//			hash_map[dir->inode]++;
+		if( dir->file_type==2 ) {
+
+			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
+				//dots++;	
+		//		if(!strcmp(dir->name,".")) {
+				//	p=dir->inode;
+	//				printf("%s\n",dir->name);
+	//				checkItself(dir,n);
+					
+	//			}
+			//	else {
+				
+			//memcpy(file_name,dir->name,dir->name_len);
+			//file_name[dir->name_len]='\0';
+		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+		//	dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
+			//		checkParent(dir,p);	
+						
+				//	p=dir->inode;
+			//	}
+			}		
+			else { 
+			memcpy(file_name,dir->name,dir->name_len);
+			file_name[dir->name_len]='\0';
+//			printf("%s/",file_name);
+//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+			checkBitMap(dir->inode);	
+//			printf("\n");
+			}
+#endif
+		//	if(do_copy){
+		//		printf("-----DO COPY!!!!------------\n");
+#if 1 	//	
+		//		memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
+		//		write_sectors(dsector,2,(buf));
+#endif		
+		//		do_copy=0;
+		//	}
+	
+	}	
+		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
+		in_buf+=block;
+		block+=dir->rec_len;		
+	}
+	
+#endif	
+    }
+ 
+
+
+
+}
 
 void clearHashMap(unsigned int* hash_map)
 {
@@ -1044,7 +1257,21 @@ void clearHashMap(unsigned int* hash_map)
 }
 void checkLinkCount(int inode)
 {
+	int i=0;
+	struct ext2_inode* current=NULL;
+	for(i=2;i<super->s_inodes_count;i++)
+	{
+		current=read_inode(i);
+		if(current->i_links_count!=my_hash_map[i]) {
+				
+			printf("Changing the link count for %d from %d to %d\n",i,current->i_links_count,my_hash_map[i]);
+			current->i_links_count=my_hash_map[i];	
+			write_inode(i,current);
 	
+		}
+			free(current);
+	}
+#if 0	
 	struct ext2_inode* current=NULL;
 	char buf[BASE_OFFSET*20];
 	struct ext2_dir_entry_2* dir=NULL;
@@ -1070,6 +1297,7 @@ void checkLinkCount(int inode)
 		//print_inode(current);
 		return;
 	}
+//	print_inode(current);
 	link_count++;
 	dir=malloc(sizeof(struct ext2_dir_entry_2));
 	//printf("INODE %d links count %d\n",inode,current->i_links_count);
@@ -1081,7 +1309,6 @@ void checkLinkCount(int inode)
 		block=BLOCK_OFFSET(block);
 		dsector=block/sector_size_bytes;
 		dsector+=start_sector;
-//	printf("The sector is %d\n",sector);
 		if(dir==NULL) return ;
 		read_device(device,dsector,2,buf);
 		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
@@ -1091,7 +1318,7 @@ void checkLinkCount(int inode)
 	
 #if 1		
 	while(dir->inode!=0) {
-//	while(block < current->i_size) 
+//	while(in_buf < block_size) { 
 #if 1
 			hash_map[dir->inode]++;
 		if( dir->file_type==2 ) {
@@ -1117,7 +1344,7 @@ void checkLinkCount(int inode)
 			}		
 			else { 
 			
-	//		printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
 			checkLinkCount(dir->inode);	
 			//printf("\n");
 			}
@@ -1146,6 +1373,8 @@ void checkLinkCount(int inode)
 	link_count--;
 	if(link_count==0)	
 		checkHash(hash_map);
+#endif
+
 }
 void checkHash(unsigned int* hash_map)
 {
@@ -1232,6 +1461,7 @@ void addCP(int n,int c,int p)
 		dir->inode=p;
 		memcpy(buf+in_buf,dir,sizeof(struct ext2_dir_entry_2));
 		write_sectors(dsector,2,buf);
+		free(current);
 		free(dir);
 		break;
 	} 
@@ -1239,7 +1469,26 @@ void addCP(int n,int c,int p)
 	return;
 
 }
+void* read_block(int block)
+{
+	void* buf=calloc(1024,sizeof(char));
+	
+	lseek(device,BLOCK_OFFSET(block)+start_sector*sector_size_bytes,SEEK_SET);
+	read(device,buf,block_size);
 
+	return buf;
+
+}
+void write_block(int block,unsigned char* buf)
+{
+	//void* buf=calloc(1024,sizeof(char));
+	
+	lseek(device,BLOCK_OFFSET(block)+start_sector*sector_size_bytes,SEEK_SET);
+	write(device,buf,block_size);
+
+	//return buf;
+
+}
 struct ext2_inode* read_inode( int inode_no)
 {
 
