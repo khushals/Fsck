@@ -56,6 +56,7 @@ static unsigned char* block_bitmap;
 #define INODE_BITMAP
 static unsigned char* inode_bitmap;
 static unsigned int* my_hash_map;
+static unsigned char* my_block_bitmap;
 // n -> inode number
 //offset -> disk offset to get inode number
 #define BLOCK_OFFSET(block)  (BASE_OFFSET + (block-1)*block_size)
@@ -83,7 +84,8 @@ static unsigned total_block_count;
 static unsigned int do_copy=0;
 static unsigned lost_and_found;
 static unsigned group_count;
-static int level_dir=1;
+static int count=0;
+static int* my_block_map;
 struct partition_table{
 		
 		int p_no;	//partition number
@@ -113,20 +115,23 @@ void checkUnreferenced(int n);
 void clearHashMap(unsigned int* hash_map);
 int checkItself(struct ext2_dir_entry_2** dir,int itself);
 void checkLinkCount(int inode);
-void checkBitMap(int inode);
+void checkBlockBitMap(int inode);
 int  checkParent(struct ext2_dir_entry_2** dir,int parent);
 struct ext2_inode* read_inode( int inode_no);
 void write_inode(int inode_no,struct ext2_inode* i);
-void unsetBit(unsigned char* bitmap,int inode);
-void setBit(unsigned char* bitmap,int inode);
+void unsetBitForInode(unsigned char* bitmap,int inode);
+void unsetBitForBlock(unsigned char* bitmap,int block);
+void setBitForInode(unsigned char* bitmap,int inode);
+void setBitForBlock(unsigned char* bitmap,int block);
 int checkAllocated(unsigned char* bitmap,int inode);
 void checkMap(unsigned char* bitmap);
 void addToLostAndFound(int inode);
 void addCP(int inode,int c,int p);
 void checkHash(unsigned int* hash_map);
 void getBitMapForInode(int inode);
+void checkFileBlocks(int inode);
 void getBitMapForBlock(int block_no);
-int checkBlockAllocated(int block);
+int checkBlockAllocated(unsigned char* bitmap,int block);
 void write_block(int block,unsigned char* buf);
 void* read_block(int block);
 void checkUnreferencedCount(void);
@@ -134,6 +139,14 @@ int getFileType(int inode);
 int getEntrySize(char * name);
 int getBlock(int inode);
 void print_directories(int inode);
+int checkValidInode(int inode);
+void blockCheck(void);
+void triplyIndirect(int block);
+void singlyIndirect(int block);
+void doublyIndirect(int block);
+void setBitMapForBlock(int block);
+void setBitForMyBlock(unsigned char* bitmap,int block);
+int checkBitForMyBlock(unsigned char* bitmap,int block);
 
 void print_inode(struct ext2_inode* inode);
 	
@@ -423,14 +436,13 @@ void startCheck(struct partition_table* temp)
 						checkUnreferenced(ROOT);
 						checkUnreferencedCount();
 						printf("-----------------  PASSS 2--------------------------------\n");
-						//checkUnreferenced(ROOT);
 						
 					case 3:
 						checkLinkCount(ROOT);
 						
 					case 4:
-						//checkBitMap(ROOT);
-						
+						checkBlockBitMap(ROOT);
+						blockCheck();	
 					default:
 							pass=4;
 							break;
@@ -457,11 +469,11 @@ void readSuperBlock(struct partition_table* temp)
 	read_device(device,temp->p.start_sect,6,buf);
 	memcpy(super,(buf+1024),sizeof(struct ext2_super_block));
 
-	while(1){
+	//while(1){
 	
 		if(super->s_magic == EXT2_SUPER_MAGIC){
 			dbg_p("Magic number is %04x\n",super->s_magic);
-			break;
+			//break;
 		}
 		else{
 			
@@ -472,7 +484,7 @@ void readSuperBlock(struct partition_table* temp)
 		
 		}
 		
-	}
+	
 	//Get the required information
 	
 	total_inodes=super->s_inodes_count;
@@ -483,7 +495,8 @@ void readSuperBlock(struct partition_table* temp)
 	blocks_per_group=super->s_blocks_per_group;	
 	start_sector=temp->p.start_sect;
 	group_count=1+(total_block_count-1)/blocks_per_group;
-//	print_superBlock(super);	
+
+	//print_superBlock(super);	
 	readGroupDescriptor((buf));
 	
 //	inode=checkInode(2,2);
@@ -497,6 +510,7 @@ void readGroupDescriptor(char* buf)
 	int64_t lret;
 	int64_t sector_offset;
 	ssize_t ret;
+
 	/*malloc & copy*/
 	group_desc=malloc(sizeof(struct ext2_group_desc)*group_count);
 	memcpy(group_desc,(buf+2048),sizeof(struct ext2_group_desc)*group_count);
@@ -504,6 +518,10 @@ void readGroupDescriptor(char* buf)
 	block_bitmap=malloc(block_size);
 	inode_bitmap=malloc(block_size);
 	my_hash_map=calloc((total_inodes+1),sizeof(int));
+	lret=1+(total_block_count-1)/8;
+	printf("lret %lu\n",lret);
+	my_block_bitmap=calloc(lret,sizeof(char));
+	//my_block_map=calloc((total_block_count),sizeof(int));
 	dbg_p("First block %d\n",first_block);
 	
 }
@@ -533,8 +551,6 @@ void getBitMapForInode(int inode)
 	}
 
 }
-
-
 void getBitMapForBlock(int block)
 {
 	int64_t lret;
@@ -552,6 +568,31 @@ void getBitMapForBlock(int block)
 		exit(-1);
 	}
 	if( (ret=read(device,block_bitmap,block_size))!=block_size) {
+		
+		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,ret);
+		exit(-1);
+
+	}
+	
+}
+void setBitMapForBlock(int block)
+{
+	int64_t lret;
+	int64_t sector_offset;
+	ssize_t ret;
+	int group_no= (block-1)/blocks_per_group;
+	int block_off = (block-1) %blocks_per_group;
+		
+	sector_offset=BLOCK_OFFSET(group_desc[group_no].bg_block_bitmap)+start_sector*sector_size_bytes;
+	
+	if( (lret=lseek64(device,sector_offset,SEEK_SET))!=sector_offset) {
+
+		fprintf(stderr,"%s Seek to position %"PRId64" failed: "
+				"returned %"PRId64"\n",__func__,sector_offset,lret);
+		exit(-1);
+	}
+	if( (ret=write(device,block_bitmap,block_size))!=block_size) {
 		
 		fprintf(stderr,"%s Read sector %"PRId64"  failed: "
 				"returned %"PRId64"\n",__func__,sector_offset,ret);
@@ -655,7 +696,7 @@ struct ext2_inode* checkInode(unsigned int n,unsigned int p)
 					lost_and_found=dir->inode;
 					//printf("LostFoundThe inode number is %d and %s\n",dir->inode,file_name);
 				}
-				printf("%s:INODE Number is %d Name is: %s Rec %d dir_type %d\n",__func__,dir->inode,file_name,dir->rec_len,dir->file_type);
+				//printf("%s:INODE Number is %d Name is: %s Rec %d dir_type %d\n",__func__,dir->inode,file_name,dir->rec_len,dir->file_type);
 				
 			dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,file_name,dir->rec_len,dir->file_type);
 			//printf("%s/",dir->name);
@@ -725,7 +766,7 @@ int checkParent(struct ext2_dir_entry_2** dir,int parent)
 
 void checkDirectories(void)
 {
-	level_dir=1;
+	//level_dir=1;
 	checkInode(2,2); //2-->ROOT,2-->PARENT
 	
 
@@ -1061,7 +1102,7 @@ void print_directories(int inode)
 
 
 }
-void setBit(unsigned char* bitmap,int inode)
+void setBitForInode(unsigned char* bitmap,int inode)
 {
 	//int group_no= inode/inodes_per_group;
 	//int inode_off = inode - (group_no*inodes_per_group) -1;
@@ -1076,7 +1117,41 @@ void setBit(unsigned char* bitmap,int inode)
 
 
 }
-void unsetBit(unsigned char* bitmap,int inode)
+void setBitForBlock(unsigned char* bitmap,int block)
+{
+	//int group_no= inode/inodes_per_group;
+	//int inode_off = inode - (group_no*inodes_per_group) -1;
+	int group_no= (block-1)/blocks_per_group;
+	int block_off = (block-1) %blocks_per_group;
+	int bit_map_index;	
+	int shift_index;
+	bit_map_index = (block_off)/8;
+	shift_index=(block_off)%8;
+	
+	bitmap[bit_map_index] |= 1<<shift_index;
+
+
+}
+void setBitForMyBlock(unsigned char* bitmap,int block)
+{
+	int bit_map_index=(block-1)/8;
+	int shift_index=(block-1)%8;
+	bitmap[bit_map_index] |= 1<<shift_index;
+
+}
+int checkBitForMyBlock(unsigned char* bitmap,int block)
+{
+	int bit_map_index=(block-1)/8;
+	int shift_index=(block-1)%8;
+	
+	if(bitmap[bit_map_index]& (1<<shift_index))
+		return 1;
+	else
+		return 0;
+
+
+}
+void unsetBitForInode(unsigned char* bitmap,int inode)
 {
 	//int group_no= inode/inodes_per_group;
 	//int inode_off = inode - (group_no*inodes_per_group) -1;
@@ -1089,6 +1164,19 @@ void unsetBit(unsigned char* bitmap,int inode)
 	
 	bitmap[bit_map_index] &= ~(1<<shift_index);
 
+
+}
+void unsetBitForBlock(unsigned char* bitmap,int block)
+{
+
+	int group_no= (block-1)/blocks_per_group;
+	int block_off = (block-1) %blocks_per_group;
+	int bit_map_index;	
+	int shift_index;
+	bit_map_index = (block_off)/8;
+	shift_index=(block_off)%8;
+	
+	bitmap[bit_map_index] &= ~(1<<shift_index);
 
 }
 int checkAllocated(unsigned char* bitmap,int inode)
@@ -1115,7 +1203,56 @@ int checkAllocated(unsigned char* bitmap,int inode)
 
 
 }
-int checkBlockAllocated(int block)
+
+void blockCheck(void)
+{
+
+	int group_no;//= (block)/blocks_per_group;
+	int block_off;// = (block) %blocks_per_group;
+	int bit_map_index;	
+	int shift_index;
+	int i=1;
+	int x=0;
+	int y=0;
+	//bit_map_index = (block_off)/8 ;
+	//shift_index=(block_off)%8;
+		
+	for(;i<=total_block_count;i++) {
+		
+	group_no= (i-1)/blocks_per_group;
+	block_off = (i-1) %blocks_per_group;
+	bit_map_index = (block_off)/8 ;
+	shift_index=(block_off)%8;
+		getBitMapForBlock(i);		
+//	printf("Bit_map_index %d\nShift Index %d\nInode_off %d Bitmap %d\n",bit_map_index,shift_index,inode_off,bitmap[bit_map_index]);
+	
+		if( (((block_bitmap[bit_map_index])&(1<<shift_index)))) {
+			
+			//printf("block %d aLlocated!\n",block);
+			//	return 1;
+			x++;	
+		}
+		else{
+			y++;
+//			printf("%d Not allocated \n",block);
+		
+			
+		}
+ 		if(checkBitForMyBlock(my_block_bitmap,i) && !checkBlockAllocated(block_bitmap,i)){
+				printf("%s: Block %d\n",__func__,i);
+				setBitForBlock(block_bitmap,i);
+				//write_block(group_count+1,block_bitmap);
+				setBitMapForBlock(i);
+		}//else 	printf(" Not allocate %d ",i);
+			
+		
+	}
+	
+	printf("Total block count %d Allocated %d not allocated %d\n",total_block_count,x,y);
+	print_superBlock(super);
+}
+
+int checkBlockAllocated(unsigned char* bitmap, int block)
 {
 
 	int group_no= (block-1)/blocks_per_group;
@@ -1125,127 +1262,285 @@ int checkBlockAllocated(int block)
 	bit_map_index = (block_off)/8 ;
 	shift_index=(block_off)%8;
 		
-	getBitMapForBlock(block);		
+	//getBitMapForBlock(block);		
 //	printf("Bit_map_index %d\nShift Index %d\nInode_off %d Bitmap %d\n",bit_map_index,shift_index,inode_off,bitmap[bit_map_index]);
 	
-	if( (((block_bitmap[bit_map_index])&(1<<shift_index)))) {
+	if( (((bitmap[bit_map_index])&(1<<shift_index)))) {
 			
 			//printf("block %d aLlocated!\n",block);
 			return 1;
 	}
 	else{
 			
-		//printf("%d Not allocated \n",block);
+		printf("%s: %d Not allocated \n",__func__,block);
 		
 		return 0;
 	}
 
 }
 
-
-void checkBitMap(int inode)
+int checkValidInode(int inode)
 {
+	if(0<inode && inode<=total_inodes)
+		return 1;
+	else{
+		printf("%s: Not valid %d\n",__func__,inode);
+		return 0;
+	}
 
-	struct ext2_inode* current=NULL;
-	char buf[BASE_OFFSET*20];
-	struct ext2_dir_entry_2* dir=NULL;
-	unsigned int sector=0;
-	unsigned int dsector=0;
-	unsigned int offset;
-	unsigned int block=0;
-    unsigned int dots=0;
-	unsigned int i=0;
-	unsigned int in_buf=0;	
-	//static unsigned link_count=0;
-	//static int level=1;
-	char file_name[EXT2_NAME_LEN+1];
-	
-//	static unsigned int* hash_map;
 
+}
+int checkValidBlock(unsigned int block)
+{
+	if(0<block && block <= total_block_count)
+		return 1;
+	else{
+		printf("%s: Not valid %d\n",__func__,block);
+		return 0;
+	}
+
+
+}
+
+void checkBlockBitMap(int inode)
+{
+	struct ext2_inode* current;
+	struct ext2_dir_entry_2* dir;
+	int i=0;
+	char* buf;
+	int block=0;	
+	if(!checkValidInode(inode))
+			return;
 	current=read_inode(inode);
-
-	dir=malloc(sizeof(struct ext2_dir_entry_2));
-	for(;current->i_block[i]!=0;i++){
-#if 1 
-		in_buf=0;	
+		
+	for(;current->i_block[i]!=0;i++)
+	{
 		block=current->i_block[i];
-		block=BLOCK_OFFSET(block);
-		dsector=block/sector_size_bytes;
-		dsector+=start_sector;
-		printf("Block[i]: %d\n",current->i_block[i]);	
-		if(checkBlockAllocated(current->i_block[i])){
-				
-			//	printf("Yes allocated\n");		
-
+		if(!checkValidBlock(block)) {
+			
+			free(current);
+			return;
 
 		}
-		else{
+		count++;
+		buf=read_block(block);
+		dir=(struct ext2_dir_entry_2*)buf;
+		unsigned int size=0;
+		setBitForMyBlock(my_block_bitmap,block);
+	//	printf("Block[%d]: %d\n",i,block);	
+		while(size < block_size && dir->inode!=0)
+		{
 
-				printf("No block %d not allocated\n",current->i_block[i]);
-		}	
-		if(dir==NULL) return ;
-		read_device(device,dsector,2,buf);
-		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		block=dir->rec_len;		
-#endif
-	
-#if 1		
-	while(dir->inode!=0) {
-//	while(block < current->i_size) 
-#if 1
-//			hash_map[dir->inode]++;
-		if( dir->file_type==2 ) {
-
-			if(!strcmp(dir->name,".") || !strcmp(dir->name,"..")) {
-				//dots++;	
-		//		if(!strcmp(dir->name,".")) {
-				//	p=dir->inode;
-	//				printf("%s\n",dir->name);
-	//				checkItself(dir,n);
-					
-	//			}
-			//	else {
+				//printf("INODE Number is %d Name is: %s Rec %d dir_type %d \n",dir->inode,dir->name,dir->rec_len,dir->file_type);
+				checkFileBlocks(dir->inode);
+				if( dir->file_type==2 ) {
 				
-			//memcpy(file_name,dir->name,dir->name_len);
-			//file_name[dir->name_len]='\0';
-		//	printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		//	dbg_p("INODE Number is %d Name is: %s Rec %d dir_type %d  parent is %d\n",dir->inode,file_name,dir->rec_len,dir->file_type,p);
-			//		checkParent(dir,p);	
-						
-				//	p=dir->inode;
-			//	}
-			}		
-			else { 
-			memcpy(file_name,dir->name,dir->name_len);
-			file_name[dir->name_len]='\0';
-//			printf("%s/",file_name);
-//			printf("INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-			checkBitMap(dir->inode);	
-//			printf("\n");
-			}
-#endif
-		//	if(do_copy){
-		//		printf("-----DO COPY!!!!------------\n");
-#if 1 	//	
-		//		memcpy((buf+in_buf),dir,sizeof(struct ext2_dir_entry_2));
-		//		write_sectors(dsector,2,(buf));
-#endif		
-		//		do_copy=0;
-		//	}
-	
-	}	
-		memcpy(dir,(buf+block),sizeof(struct ext2_dir_entry_2));
-		in_buf+=block;
-		block+=dir->rec_len;		
+			//		memcpy(prev,dir,sizeof(struct ext2_dir_entry_2));
+					if(!(strcmp(dir->name,".."))|| !(strcmp(dir->name,"."))) {
+							
+							//count++;
+					
+					}
+					else {
+							//printf("%s/",dir->name);
+							checkBlockBitMap(dir->inode);
+						}
+				}
+			//	else 
+			//		checkFileBlocks(dir->inode);	
+			
+			//in_buf=dir->rec_len;
+			dir=(void*)dir+dir->rec_len;
+			size+=dir->rec_len;
+
+		}
+		
+		free(buf);
 	}
-	
-#endif	
-    }
  
+		free(current);
 
+	printf("COunt is %d\n",count);
+}
+void checkFileBlocks(int inode)
+{
+	struct ext2_inode* current;
+	int size=0;
+	if(!checkValidInode(inode))
+			return;
+	current=read_inode(inode);
+	int i=0;
+	int block=0;
+//	printf("%s: %c\n",__func__,current->i_block[0]);
+	for(;current->i_block[i]!=0 && i!=12;i++)
+	{
+			//count++;
+		block=current->i_block[i];
+		if(!checkValidBlock(block)) {
+			
+		
+			free(current);
+			return;
 
+		}
+	//	if(checkBlockAllocated(block)){
+			count++;
+			setBitForMyBlock(my_block_bitmap,block);
+			//printf("Block not Allocated %d\n",block);
+		
+	//	}
 
+	}
+//	printf("Here\n");
+	if(i<12) {  free(current); return;}	
+//	printf("%s: SINGLY %d\n",__func__,current->i_block[i]);	
+	if(current->i_block[i]!=0) {
+		
+		//indirect=read_block(current->i_block[i]);
+		block=current->i_block[i];
+		if(!checkValidBlock(block)) {
+			
+			free(current);
+			return;
+
+		}
+//		if(checkBlockAllocated(block)){
+
+			count++;
+			setBitForMyBlock(my_block_bitmap,block);
+		
+//		}
+		//printf("Not good");	
+		singlyIndirect(block);	
+		i++;
+	}
+	else {
+		//printf("Free singly\n"); 
+		free(current);
+	 	return;
+	}
+//	printf("%s: DOUBLY and is %d\n",__func__,current->i_block[i]);	
+	if(current->i_block[i]!=0) {
+		block=current->i_block[i];
+		if(!checkValidBlock(block)) {
+			
+			free(current);
+			return;
+
+		}
+	//	if(checkBlockAllocated(block)){
+			count++;
+			setBitForMyBlock(my_block_bitmap,block);
+	//		printf("Block not Allocated %d\n",block);
+		
+	//	}
+	
+		doublyIndirect(block);
+		i++;
+	}
+	else {
+		free(current);
+		return;
+	}
+	//printf("%s: TRIPLY\n",__func__);	
+	if(current->i_block[i]!=0) {
+		
+
+		block=current->i_block[i];
+		if(!checkValidBlock(block)) {
+			
+			free(current);
+			return;
+
+		}
+	//	if(checkBlockAllocated(block)){
+			count++;
+			setBitForMyBlock(my_block_bitmap,block);
+			//printf("Block not Allocated %d\n",block);
+		
+	//	}
+		triplyIndirect(current->i_block[i]);
+
+	}
+	free(current);	
+	return;
+}
+
+void singlyIndirect(int block_no)
+{		
+		unsigned int* indirect=(unsigned int *)read_block(block_no);
+		unsigned int* temp= indirect;
+		int block=0;
+		while(temp!=NULL && *temp!=0){
+		
+			//getBitMapForBlock(*indirect);
+			block=*temp;
+		if(!checkValidBlock(block)) {
+			
+			free(indirect);
+			return;
+
+		}
+		//	if(checkBlockAllocated(block)){
+			
+				count++;
+				setBitForMyBlock(my_block_bitmap,block);
+			//printf("Block not Allocated %d\n",block);
+				
+		//	}
+			
+			temp++;
+		}
+		
+		free(indirect);
+		
+}
+void doublyIndirect(int block_no)
+{
+		unsigned int* indirect=(unsigned int *)read_block(block_no);
+		unsigned int* temp= indirect;
+		int block=0;
+		while(temp!=NULL && *temp!=0){
+		
+			block=*temp;
+			
+			if(!checkValidBlock(block)) {
+			
+			free(indirect);
+			return;
+
+		}
+			setBitForMyBlock(my_block_bitmap,block);
+			count++;
+			singlyIndirect(block);
+			temp++;
+		}
+
+		free(indirect);
+}
+
+void triplyIndirect(int block_no)
+{
+		unsigned int *indirect=(unsigned int *)read_block(block_no);
+		unsigned int* temp= indirect;
+		int block=0;
+	
+		while(temp!=NULL && *temp!=0){
+
+			block=*temp;
+			if(!checkValidBlock(block)) {
+			
+			free(indirect);
+			return;
+
+			}
+			count++;
+				setBitForMyBlock(my_block_bitmap,block);
+			doublyIndirect(block);
+			temp++;
+			
+		}
+		free(indirect);
 }
 
 void clearHashMap(unsigned int* hash_map)
@@ -1419,56 +1714,7 @@ void print_inode(struct ext2_inode* inode)
 	
 
 }
-/*  ADD  '.' and '..' */
-void addCP(int n,int c,int p)
-{
-	struct ext2_inode* current=NULL;
-	char buf[BASE_OFFSET];
-	struct ext2_dir_entry_2* dir=NULL;
-	unsigned int dsector=0;
-	unsigned int block=0;
-	unsigned int i=0;
-	unsigned in_buf=0;
-	current=read_inode(n);
-	
-	if(current==NULL) {
-		
-		printf("%s: No allocation of c&p",__func__);
-		return;	
 
-	}
-
-	//print_inode(current);	
-	//printf("Size in bytes %u pointer to first data block %u blocks count %d links count %d\n",current->i_size,current->i_block[0],current->i_blocks,current->i_links_count);
-	//printf("%d\n",6/8);
-	for(;current->i_block[i]!=0;i++){
- 
-		block=current->i_block[i];
-		block=BLOCK_OFFSET(block);
-		dsector=block/sector_size_bytes;
-		dsector+=start_sector;
-//	printf("The sector is %d\n",sector);
-		dir=malloc(sizeof(struct ext2_dir_entry_2));
-		if(dir==NULL) return;
-		read_device(device,dsector,2,buf);
-		memcpy(dir,buf,sizeof(struct ext2_dir_entry_2));	
-//		printf(" INODE Number is %d Name is: %s Rec %d dir_type %d\n",dir->inode,dir->name,dir->rec_len,dir->file_type);
-		block=dir->rec_len;		
-		in_buf=dir->rec_len;
-		dir->inode=n;
-		memcpy(buf,dir,sizeof(struct ext2_dir_entry_2));
-		memcpy(dir,buf+dir->rec_len,sizeof(struct ext2_dir_entry_2));			
-		dir->inode=p;
-		memcpy(buf+in_buf,dir,sizeof(struct ext2_dir_entry_2));
-		write_sectors(dsector,2,buf);
-		free(current);
-		free(dir);
-		break;
-	} 
-
-	return;
-
-}
 void* read_block(int block)
 {
 	void* buf=calloc(1024,sizeof(char));
